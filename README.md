@@ -17,7 +17,10 @@ This repository currently implements the deterministic P0 foundation:
 - an idempotent decision journal with explicit availability, retrieval, presentation,
   and usage evidence;
 - a deterministic accountability verdict derived from that evidence;
-- an idempotent demo seed, one focused test, and a CLI proof.
+- a serializable, idempotent remediation that corrects the invoice, creates one refund,
+  closes the dispute, and opens one ingestion incident atomically;
+- procedural memory written in the same CockroachDB transaction;
+- idempotent demo data, focused tests, and a CLI proof with a safe replay.
 
 The demo proves that a EUR 0.15 rate is current truth while the billing agent could only
 know and select the EUR 0.25 rate on July 2, 2026. The resulting verdict is
@@ -30,7 +33,7 @@ Requirements: [uv](https://docs.astral.sh/uv/) and Python 3.12–3.14.
 ```bash
 uv sync
 uv run hindsight demo
-uv run pytest tests/test_retroactive_rate.py
+uv run pytest
 ```
 
 The demo command uses a local in-memory repository so contributors can verify the
@@ -40,14 +43,15 @@ To run the proof against CockroachDB, configure separate schema-owner and least-
 runtime URLs in the environment:
 
 ```bash
-uv run hindsight migrate
-uv run hindsight demo --cockroach
+uv run --env-file .env hindsight migrate
+uv run --env-file .env hindsight demo --cockroach
 ```
 
 The explicit `--cockroach` flag prevents a local demo from mutating a database merely
 because `DATABASE_URL` exists in the shell. Migration and runtime credentials remain
 separate. Run `migrate` again after pulling a new migration; every migration is safe to
-replay.
+replay. Serializable conflicts retry with bounded backoff, while an ambiguous commit is
+reconciled through the remediation idempotency key on a fresh connection.
 
 ## Temporal model
 
@@ -83,14 +87,14 @@ flowchart TB
     subgraph CORE["Deterministic accountability core"]
         BILLING["✅ Telecom billing calculation"]
         VERDICT["✅ Evidence-based verdict engine"]
-        REMEDIATION["▶ Serializable idempotent remediation"]
+        REMEDIATION["✅ Serializable idempotent remediation"]
     end
 
     subgraph CRDB["CockroachDB — durable agent memory"]
         ASSERTIONS["✅ Bi-temporal assertions"]
         JOURNAL["✅ Decisions + evidence journal"]
-        OPERATIONS["▶ CDRs, invoices, disputes,<br/>refunds and incidents"]
-        MEMORY["▶ Procedural memory"]
+        OPERATIONS["✅ CDRs, invoices, disputes,<br/>refunds and incidents"]
+        MEMORY["✅ Procedural memory persistence"]
         VECTOR["○ Distributed Vector Index"]
         MCP["○ Managed MCP Server<br/>read-only investigation"]
     end
@@ -125,9 +129,10 @@ flowchart TB
     API --> DASHBOARD
 ```
 
-The delivery order is remediation and procedural memory first, then Bedrock agents,
-Managed MCP and vector retrieval, and finally the public API, dashboard, AWS deployment,
-observability, and access-control hardening.
+The next proof will retrieve procedural memory during a second investigation and measure
+whether it improves the workflow. Bedrock agents, Managed MCP and vector retrieval then
+follow, before the public API, dashboard, AWS deployment, observability, and access-control
+hardening.
 
 ## Demo data and safety
 

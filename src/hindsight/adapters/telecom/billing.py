@@ -36,7 +36,7 @@ class TelecomAdapter:
         assertion: Assertion,
     ) -> DecisionCalculation:
         rate = _rate(assertion)
-        amount = _call_amount(event.duration_seconds, rate)
+        amount = calculate_call_amount(event.duration_seconds, rate)
         return DecisionCalculation(
             selected_assertion_id=assertion.id,
             selected_value=rate,
@@ -55,7 +55,7 @@ class TelecomAdapter:
         truth_rate = _rate(current_truth)
         duration_seconds = int(decision.output["duration_seconds"])
         billed_amount = Decimal(decision.output["amount"])
-        expected_amount = _call_amount(duration_seconds, truth_rate)
+        expected_amount = calculate_call_amount(duration_seconds, truth_rate)
         return OutcomeComparison(
             is_correct=decision.selected_value == truth_rate,
             current_truth_value=truth_rate,
@@ -76,6 +76,6 @@ def _rate(assertion: Assertion) -> Decimal:
     return assertion.value_number
 
 
-def _call_amount(duration_seconds: int, rate: Decimal) -> Decimal:
+def calculate_call_amount(duration_seconds: int, rate: Decimal) -> Decimal:
     minutes = Decimal(duration_seconds) / SECONDS_PER_MINUTE
     return (minutes * rate).quantize(CENT, rounding=ROUND_HALF_UP)
