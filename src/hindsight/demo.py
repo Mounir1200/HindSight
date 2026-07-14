@@ -29,10 +29,15 @@ from hindsight.core.assertions.service import TemporalAssertionService
 from hindsight.core.decisions.models import DecisionAudit, DecisionJournalEntry
 from hindsight.core.decisions.repository import DecisionRepository
 from hindsight.core.decisions.service import DecisionAuditService, DecisionJournalService
-from hindsight.core.memory import ProceduralMemoryReader
+from hindsight.core.memory import ProceduralMemoryIndexer, ProceduralMemoryReader
+from hindsight.infrastructure.vector_memory import MEMORY_VECTOR_INDEX_NAME
 
 
 class DemoRepository(TelecomRemediationRepository, ProceduralMemoryReader, Protocol):
+    pass
+
+
+class DemoVectorMemory(ProceduralMemoryReader, ProceduralMemoryIndexer, Protocol):
     pass
 
 
@@ -42,6 +47,7 @@ def run_demo_workflow(
     remediation_repository: DemoRepository,
     backend: str,
     *,
+    vector_memory: DemoVectorMemory | None = None,
     include_investigation_context: bool = False,
 ) -> dict[str, object]:
     assertions = TemporalAssertionService(assertion_repository)
@@ -57,9 +63,13 @@ def run_demo_workflow(
     first_attempt = remediation_repository.apply_remediation(plan)
     second_attempt = remediation_repository.apply_remediation(plan)
     final_state = remediation_repository.snapshot(plan.dispute_id, plan.memory_key)
+    embedding_receipt = (
+        vector_memory.index(first_attempt.memory_id) if vector_memory is not None else None
+    )
+    memory_reader = vector_memory or remediation_repository
 
     before_memory = build_investigation_guidance(
-        remediation_repository,
+        memory_reader,
         dispute_id=case.dispute_id,
         route=case.route,
         service_type=case.service_type,
@@ -68,7 +78,7 @@ def run_demo_workflow(
         exclude_current_case=False,
     )
     after_memory = build_investigation_guidance(
-        remediation_repository,
+        memory_reader,
         dispute_id=FOLLOW_UP_DEMO_CASE.dispute_id,
         route=DEMO_ROUTE,
         service_type=DEMO_SERVICE_TYPE,
@@ -158,6 +168,21 @@ def run_demo_workflow(
             },
         },
         "learning_proof": {
+            "vector_memory": (
+                {
+                    "enabled": True,
+                    "tool": "cockroachdb_distributed_vector_index",
+                    "index_name": MEMORY_VECTOR_INDEX_NAME,
+                    "memory_id": embedding_receipt.memory_id,
+                    "status": embedding_receipt.status,
+                    "model_id": embedding_receipt.model_id,
+                    "dimensions": embedding_receipt.dimensions,
+                    "input_tokens": embedding_receipt.input_tokens,
+                    "embedded_at": embedding_receipt.embedded_at,
+                }
+                if embedding_receipt is not None
+                else {"enabled": False}
+            ),
             "second_case": {
                 "call_id": FOLLOW_UP_DEMO_CASE.call_id,
                 "dispute_id": follow_up_case.dispute_id,
@@ -261,6 +286,7 @@ def _guidance_payload(guidance: InvestigationGuidance) -> dict[str, object]:
         "remediation_run_id": guidance.remediation_run_id,
         "retrieval_method": guidance.retrieval_method,
         "retrieval_rank": guidance.retrieval_rank,
+        "retrieval_score": guidance.retrieval_score,
         "applicable_at": guidance.applicable_at,
         "known_at": guidance.known_at,
         "memory_recorded_at": guidance.memory_recorded_at,

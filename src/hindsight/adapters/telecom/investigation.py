@@ -23,6 +23,7 @@ class InvestigationGuidance:
     retrieval_method: str | None = None
     retrieval_rank: int | None = None
     memory_recorded_at: datetime | None = None
+    retrieval_score: float | None = None
 
     @property
     def procedure_steps_reused(self) -> int:
@@ -75,5 +76,6 @@ def build_investigation_guidance(
         remediation_run_id=memory.remediation_run_id,
         retrieval_method=retrieval.method,
         retrieval_rank=memory.rank,
+        retrieval_score=memory.score,
         memory_recorded_at=memory.recorded_at,
     )

@@ -23,6 +23,8 @@ Bedrock investigation slice:
 - procedural memory written in the same CockroachDB transaction;
 - bi-temporal procedural retrieval that guides a second, similar investigation without
   changing its deterministic verdict or financial calculation;
+- CockroachDB Distributed Vector Index retrieval over Bedrock Titan embeddings, with exact
+  domain filters, temporal eligibility checks, similarity scores, and structured fallback;
 - a client-side Bedrock Converse tool-use loop with one case-scoped read-only tool;
 - durable CockroachDB `agent_runs` and `tool_calls` traces, including bounded inputs,
   results, token usage, stop reasons, and sanitized failures;
@@ -62,11 +64,38 @@ separate. Run `migrate` again after pulling a new migration; every migration is 
 replay. Serializable conflicts retry with bounded backoff, while an ambiguous commit is
 reconciled through stable remediation or journal identifiers on a fresh connection.
 
+The vector proof is also explicit because it invokes Bedrock Titan and can be billable:
+
+```bash
+uv run --env-file .env hindsight demo --cockroach --vector
+```
+
+It embeds the immutable procedure after the financial remediation commits, stores the
+1,024-dimensional vector in `memory_embeddings`, and retrieves it through the cosine
+`memory_embeddings_cosine_idx`. Exact index prefixes restrict domain, namespace, kind,
+embedding model, route, and service before ANN search. Bi-temporal eligibility and case
+exclusion are applied to a bounded candidate set, expanded once when post-filtering leaves too
+few results. Matches below the `0.80` similarity safety floor are rejected; the existing
+structured lookup remains a deterministic fallback. Replays do not re-embed an unchanged
+stored procedure, while retrieval queries still invoke Titan. Embedding failure cannot roll
+back a corrected invoice or refund.
+
+The migration never changes cluster-wide settings. An operator can verify DVI with
+`SHOW CLUSTER SETTING feature.vector_index.enabled`; only an administrator should enable it
+when required. The application and migration users do not need that cluster privilege.
+
 The Bedrock proof is explicit, durable, and potentially billable. Configure `AWS_REGION`
 and `BEDROCK_MODEL_ID`, use the normal AWS SDK credential provider chain, then run:
 
 ```bash
 uv run --env-file .env hindsight demo --cockroach --bedrock
+```
+
+For the complete hackathon proof with both the distributed vector memory and the durable
+agent investigation, run:
+
+```bash
+uv run --env-file .env hindsight demo --cockroach --vector --bedrock
 ```
 
 The command fails closed if the model skips the evidence tool, requests another case,
@@ -125,8 +154,8 @@ flowchart TB
         OPERATIONS["✅ CDRs, invoices, disputes,<br/>refunds and incidents"]
         MEMORY["✅ Procedural memory +<br/>bi-temporal retrieval"]
         AGENT_JOURNAL["✅ Agent runs + tool calls"]
-        VECTOR["▶ Distributed Vector Index"]
-        MCP["○ Managed MCP Server<br/>read-only investigation"]
+        VECTOR["✅ Distributed Vector Index<br/>temporal semantic retrieval"]
+        MCP["▶ Managed MCP Server<br/>read-only investigation"]
     end
 
     DASHBOARD["○ Public investigation dashboard"]
@@ -163,10 +192,9 @@ flowchart TB
     API --> DASHBOARD
 ```
 
-The next milestone adds semantic retrieval through CockroachDB's Distributed Vector Index.
-The exact route, service, and dispute-symptom lookup remains the deterministic fallback.
-Managed MCP then replaces the local read-only tool boundary, before the public API,
-dashboard, AWS deployment, observability, and access-control hardening.
+The next milestone replaces the local read-only investigation tool boundary with CockroachDB
+Managed MCP. The public API, dashboard, AWS deployment, observability, and access-control
+hardening follow after that integration.
 
 ## Demo data and safety
 
