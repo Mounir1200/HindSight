@@ -18,12 +18,12 @@ class Verdict(StrEnum):
 class VerdictContext:
     selected_value: Decimal
     current_truth_value: Decimal
-    correct_evidence_existed_at_decision: bool
-    correct_evidence_was_accessible_to_agent: bool
-    correct_evidence_was_retrieved: bool
-    correct_evidence_was_presented: bool
-    correct_evidence_was_used: bool
-    lower_trust_source_overrode_higher_trust_source: bool = False
+    correct_evidence_existed_at_decision: bool | None
+    correct_evidence_was_accessible_to_agent: bool | None
+    correct_evidence_was_retrieved: bool | None
+    correct_evidence_was_presented: bool | None
+    correct_evidence_was_used: bool | None
+    lower_trust_source_overrode_higher_trust_source: bool | None = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,16 +40,26 @@ class VerdictResult:
 def classify_decision(context: VerdictContext) -> Verdict:
     if context.selected_value == context.current_truth_value:
         return Verdict.CORRECT
-    if not context.correct_evidence_existed_at_decision:
+    if context.correct_evidence_existed_at_decision is False:
         return Verdict.WRONG_NOT_KNOWABLE
-    if not context.correct_evidence_was_accessible_to_agent:
+    if context.correct_evidence_existed_at_decision is None:
+        return Verdict.INSUFFICIENT_EVIDENCE
+    if context.correct_evidence_was_accessible_to_agent is False:
         return Verdict.WRONG_NOT_KNOWABLE
-    if not context.correct_evidence_was_retrieved:
+    if context.correct_evidence_was_accessible_to_agent is None:
+        return Verdict.INSUFFICIENT_EVIDENCE
+    if context.correct_evidence_was_retrieved is False:
         return Verdict.WRONG_KNOWABLE_NOT_RETRIEVED
-    if not context.correct_evidence_was_presented:
+    if context.correct_evidence_was_retrieved is None:
+        return Verdict.INSUFFICIENT_EVIDENCE
+    if context.correct_evidence_was_presented is False:
         return Verdict.WRONG_RETRIEVED_NOT_PRESENTED
-    if not context.correct_evidence_was_used:
+    if context.correct_evidence_was_presented is None:
+        return Verdict.INSUFFICIENT_EVIDENCE
+    if context.correct_evidence_was_used is False:
         return Verdict.WRONG_PRESENTED_IGNORED
-    if context.lower_trust_source_overrode_higher_trust_source:
+    if context.correct_evidence_was_used is None:
+        return Verdict.INSUFFICIENT_EVIDENCE
+    if context.lower_trust_source_overrode_higher_trust_source is True:
         return Verdict.WRONG_DUE_TO_UNTRUSTED_SOURCE
     return Verdict.INSUFFICIENT_EVIDENCE

@@ -1,10 +1,14 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
 from hindsight.adapters.telecom.billing import TelecomAdapter
 from hindsight.adapters.telecom.seed import (
+    DEMO_CALL_ID,
+    DEMO_DECISION_ID,
     DEMO_DECISION_TIME,
     DEMO_EVENT_TIME,
+    DEMO_INVESTIGATION_TIME,
     DEMO_TARIFF_KEY,
     demo_call,
     seed_demo,
@@ -12,7 +16,8 @@ from hindsight.adapters.telecom.seed import (
 from hindsight.core.assertions.models import TemporalLookup
 from hindsight.core.assertions.repository import InMemoryAssertionRepository
 from hindsight.core.assertions.service import TemporalAssertionService
-from hindsight.core.decisions.service import DecisionAuditService
+from hindsight.core.decisions.repository import InMemoryDecisionRepository
+from hindsight.core.decisions.service import DecisionAuditService, DecisionJournalService
 from hindsight.core.verdicts.engine import Verdict
 
 
@@ -38,6 +43,38 @@ def test_retroactive_rate_preserves_history_and_exonerates_agent() -> None:
     assert audit.verdict.verdict is Verdict.WRONG_NOT_KNOWABLE
     assert audit.verdict.agent_fault is False
     assert audit.verdict.knowledge_gap_seconds == 172_800
+
+    evidence = {item.evidence_type: item for item in audit.evidence}
+    assert evidence["decision_input"].assertion_id == audit.snapshot.known_at_decision.id
+    assert evidence["decision_input"].was_used_for_decision is True
+    assert evidence["decision_input"].was_presented_to_model is False
+    assert evidence["counterfactual_current_truth"].assertion_id == audit.snapshot.current_truth.id
+    assert evidence["counterfactual_current_truth"].available_to_agent is False
+    assert evidence["counterfactual_current_truth"].exclusion_reason == "not_recorded_at_decision"
+
+    decision_repository = InMemoryDecisionRepository()
+    journal = DecisionJournalService(decision_repository)
+    record = journal.record(
+        audit,
+        decision_id=DEMO_DECISION_ID,
+        agent_id="billing_agent",
+        action="calculate_call_charge",
+        subject_type="telecom_call",
+        subject_id=DEMO_CALL_ID,
+        investigated_at=DEMO_INVESTIGATION_TIME,
+        input={"call_id": DEMO_CALL_ID},
+    )
+    replay = journal.record(
+        replace(audit, evidence=tuple(reversed(audit.evidence))),
+        decision_id=DEMO_DECISION_ID,
+        agent_id="billing_agent",
+        action="calculate_call_charge",
+        subject_type="telecom_call",
+        subject_id=DEMO_CALL_ID,
+        investigated_at=DEMO_INVESTIGATION_TIME,
+        input={"call_id": DEMO_CALL_ID},
+    )
+    assert replay == record == decision_repository.get(DEMO_DECISION_ID)
 
     history = repository.history(DEMO_TARIFF_KEY)
     assert [item.version_number for item in history] == [1, 2]

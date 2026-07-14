@@ -8,13 +8,15 @@ synthetic telecom billing dispute caused by a late retroactive tariff.
 
 ## Current milestone
 
-This repository currently implements the first deterministic P0 milestone:
+This repository currently implements the deterministic P0 foundation:
 
 - generic bi-temporal assertions;
 - append-only fact versions with supersession metadata;
 - parameterized CockroachDB truth and knowledge queries;
 - a telecom domain adapter that calculates billing without an LLM;
-- a deterministic accountability verdict;
+- an idempotent decision journal with explicit availability, retrieval, presentation,
+  and usage evidence;
+- a deterministic accountability verdict derived from that evidence;
 - an idempotent demo seed, one focused test, and a CLI proof.
 
 The demo proves that a EUR 0.15 rate is current truth while the billing agent could only
@@ -44,7 +46,8 @@ uv run hindsight demo --cockroach
 
 The explicit `--cockroach` flag prevents a local demo from mutating a database merely
 because `DATABASE_URL` exists in the shell. Migration and runtime credentials remain
-separate.
+separate. Run `migrate` again after pulling a new migration; every migration is safe to
+replay.
 
 ## Temporal model
 
@@ -58,19 +61,73 @@ or overwritten; only their supersession metadata is closed transactionally. Curr
 and knowledge-at-decision-time select the latest recorded version that applies to the
 event, using explicit deterministic SQL.
 
-## Architecture
+## Architecture and implementation roadmap
 
-```text
-Generic temporal core
-        ↓
-Telecom domain adapter
-        ↓
-CLI reference workflow
+Status: ✅ implemented · ▶ next milestone · ○ planned.
+
+```mermaid
+flowchart TB
+    subgraph INPUTS["Synthetic telecom inputs"]
+        TARIFFS["Tariff versions"]
+        CDRS["Call detail records"]
+    end
+
+    subgraph AWS["AWS application layer"]
+        INGEST["○ S3 + Lambda ingestion"]
+        BILLING_AGENT["○ Bedrock Billing Agent"]
+        INVESTIGATION_AGENT["○ Bedrock Investigation Agent"]
+        REMEDIATION_AGENT["○ Bedrock Remediation Agent"]
+        API["○ Web API"]
+    end
+
+    subgraph CORE["Deterministic accountability core"]
+        BILLING["✅ Telecom billing calculation"]
+        VERDICT["✅ Evidence-based verdict engine"]
+        REMEDIATION["▶ Serializable idempotent remediation"]
+    end
+
+    subgraph CRDB["CockroachDB — durable agent memory"]
+        ASSERTIONS["✅ Bi-temporal assertions"]
+        JOURNAL["✅ Decisions + evidence journal"]
+        OPERATIONS["▶ CDRs, invoices, disputes,<br/>refunds and incidents"]
+        MEMORY["▶ Procedural memory"]
+        VECTOR["○ Distributed Vector Index"]
+        MCP["○ Managed MCP Server<br/>read-only investigation"]
+    end
+
+    DASHBOARD["○ Public investigation dashboard"]
+
+    TARIFFS --> INGEST
+    CDRS --> INGEST
+    INGEST --> ASSERTIONS
+    INGEST --> OPERATIONS
+
+    BILLING_AGENT --> BILLING
+    BILLING <--> ASSERTIONS
+    BILLING --> JOURNAL
+
+    INVESTIGATION_AGENT --> MCP
+    MCP --> ASSERTIONS
+    MCP --> JOURNAL
+    ASSERTIONS --> VERDICT
+    JOURNAL --> VERDICT
+
+    VERDICT --> REMEDIATION
+    REMEDIATION_AGENT --> REMEDIATION
+    REMEDIATION --> OPERATIONS
+    REMEDIATION --> MEMORY
+    MEMORY --> VECTOR
+    VECTOR --> INVESTIGATION_AGENT
+
+    JOURNAL --> API
+    VERDICT --> API
+    OPERATIONS --> API
+    API --> DASHBOARD
 ```
 
-CockroachDB is the production persistence port. The next milestones add persisted
-decision evidence and idempotent remediation, then Bedrock explanations, read-only
-Managed MCP investigation, Distributed Vector Indexing, and the AWS-hosted interface.
+The delivery order is remediation and procedural memory first, then Bedrock agents,
+Managed MCP and vector retrieval, and finally the public API, dashboard, AWS deployment,
+observability, and access-control hardening.
 
 ## Demo data and safety
 
