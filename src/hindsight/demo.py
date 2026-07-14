@@ -1,4 +1,5 @@
-from typing import Protocol
+from typing import Protocol, cast
+from uuid import UUID
 
 from hindsight.adapters.telecom.billing import TelecomAdapter
 from hindsight.adapters.telecom.investigation import (
@@ -40,6 +41,8 @@ def run_demo_workflow(
     decision_repository: DecisionRepository,
     remediation_repository: DemoRepository,
     backend: str,
+    *,
+    include_investigation_context: bool = False,
 ) -> dict[str, object]:
     assertions = TemporalAssertionService(assertion_repository)
     seed_demo(assertions)
@@ -85,7 +88,7 @@ def run_demo_workflow(
     )
     remediation_repository.seed_case(follow_up_case)
 
-    return {
+    payload = {
         "scenario": "retroactive_telecom_rate",
         "backend": backend,
         "current_truth": {
@@ -199,6 +202,15 @@ def run_demo_workflow(
             },
         },
     }
+    if include_investigation_context:
+        learning_proof = cast(dict[str, object], payload["learning_proof"])
+        learning_proof["investigation_context"] = _investigation_context(
+            follow_up_audit,
+            follow_up_journal,
+            follow_up_case.dispute_id,
+            after_memory,
+        )
+    return payload
 
 
 def _audit_case(
@@ -253,6 +265,57 @@ def _guidance_payload(guidance: InvestigationGuidance) -> dict[str, object]:
         "applicable_at": guidance.applicable_at,
         "known_at": guidance.known_at,
         "memory_recorded_at": guidance.memory_recorded_at,
+    }
+
+
+def _investigation_context(
+    audit: DecisionAudit,
+    journal: DecisionJournalEntry,
+    dispute_id: UUID,
+    guidance: InvestigationGuidance,
+) -> dict[str, object]:
+    return {
+        "case_id": dispute_id,
+        "decision": {
+            "id": journal.record.id,
+            "event_time": audit.lookup.event_time,
+            "decided_at": audit.lookup.decision_time,
+            "selected_assertion_id": audit.decision.selected_assertion_id,
+        },
+        "current_truth": {
+            "assertion_id": audit.snapshot.current_truth.id,
+            "rate": audit.snapshot.current_truth.value_number,
+            "valid_from": audit.snapshot.current_truth.valid_from,
+            "recorded_at": audit.snapshot.current_truth.recorded_at,
+        },
+        "known_at_decision": {
+            "assertion_id": audit.snapshot.known_at_decision.id,
+            "rate": audit.snapshot.known_at_decision.value_number,
+        },
+        "evidence": [
+            {
+                "evidence_type": item.evidence_type,
+                "assertion_id": item.assertion_id,
+                "available_to_agent": item.available_to_agent,
+                "retrieved": item.retrieved_at is not None,
+                "was_used_for_decision": item.was_used_for_decision,
+                "exclusion_reason": item.exclusion_reason,
+            }
+            for item in journal.evidence
+        ],
+        "comparison": audit.comparison.details,
+        "verdict": {
+            "category": audit.verdict.verdict,
+            "agent_fault": audit.verdict.agent_fault,
+            "knowledge_gap_seconds": audit.verdict.knowledge_gap_seconds,
+            "root_cause": audit.verdict.root_cause,
+        },
+        "procedural_guidance": _guidance_payload(guidance),
+        "authority": {
+            "verdict": "deterministic_temporal_engine",
+            "financials": "telecom_adapter",
+            "procedural_guidance": "advisory_memory",
+        },
     }
 
 

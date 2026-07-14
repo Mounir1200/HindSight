@@ -8,7 +8,8 @@ synthetic telecom billing dispute caused by a late retroactive tariff.
 
 ## Current milestone
 
-This repository currently implements the deterministic P0 foundation:
+This repository implements the deterministic P0 foundation and the first bounded
+Bedrock investigation slice:
 
 - generic bi-temporal assertions;
 - append-only fact versions with supersession metadata;
@@ -22,6 +23,9 @@ This repository currently implements the deterministic P0 foundation:
 - procedural memory written in the same CockroachDB transaction;
 - bi-temporal procedural retrieval that guides a second, similar investigation without
   changing its deterministic verdict or financial calculation;
+- a client-side Bedrock Converse tool-use loop with one case-scoped read-only tool;
+- durable CockroachDB `agent_runs` and `tool_calls` traces, including bounded inputs,
+  results, token usage, stop reasons, and sanitized failures;
 - idempotent demo data, focused tests, and a CLI proof with a safe replay.
 
 The demo proves that a EUR 0.15 rate is current truth while the billing agent could only
@@ -56,7 +60,22 @@ The explicit `--cockroach` flag prevents a local demo from mutating a database m
 because `DATABASE_URL` exists in the shell. Migration and runtime credentials remain
 separate. Run `migrate` again after pulling a new migration; every migration is safe to
 replay. Serializable conflicts retry with bounded backoff, while an ambiguous commit is
-reconciled through the remediation idempotency key on a fresh connection.
+reconciled through stable remediation or journal identifiers on a fresh connection.
+
+The Bedrock proof is explicit, durable, and potentially billable. Configure `AWS_REGION`
+and `BEDROCK_MODEL_ID`, use the normal AWS SDK credential provider chain, then run:
+
+```bash
+uv run --env-file .env hindsight demo --cockroach --bedrock
+```
+
+The command fails closed if the model skips the evidence tool, requests another case,
+uses an unknown tool, returns no final explanation, or exceeds the fixed turn/tool
+budgets. The model only explains an already computed result: it cannot change a verdict,
+amount, invoice, refund, or remediation. A real Bedrock run still needs to be captured;
+the repository currently validates orchestration locally with an injected scripted client.
+Bedrock itself is not transactionally exactly-once: a new CLI invocation creates a new
+audited run, while the only external tool in this milestone is read-only and replay-safe.
 
 ## Temporal model
 
@@ -84,7 +103,7 @@ flowchart TB
     subgraph AWS["AWS application layer"]
         INGEST["○ S3 + Lambda ingestion"]
         BILLING_AGENT["○ Bedrock Billing Agent"]
-        INVESTIGATION_AGENT["○ Bedrock Investigation Agent"]
+        INVESTIGATION_AGENT["▶ Bedrock Investigation Agent<br/>Converse integration ready"]
         REMEDIATION_AGENT["○ Bedrock Remediation Agent"]
         API["○ Web API"]
     end
@@ -94,6 +113,7 @@ flowchart TB
         VERDICT["✅ Evidence-based verdict engine"]
         REMEDIATION["✅ Serializable idempotent remediation"]
         GUIDANCE["✅ Memory-guided investigation"]
+        CONTEXT_TOOL["✅ Case-scoped read-only<br/>investigation tool"]
     end
 
     subgraph CRDB["CockroachDB — durable agent memory"]
@@ -101,6 +121,7 @@ flowchart TB
         JOURNAL["✅ Decisions + evidence journal"]
         OPERATIONS["✅ CDRs, invoices, disputes,<br/>refunds and incidents"]
         MEMORY["✅ Procedural memory +<br/>bi-temporal retrieval"]
+        AGENT_JOURNAL["✅ Agent runs + tool calls"]
         VECTOR["○ Distributed Vector Index"]
         MCP["○ Managed MCP Server<br/>read-only investigation"]
     end
@@ -116,9 +137,11 @@ flowchart TB
     BILLING <--> ASSERTIONS
     BILLING --> JOURNAL
 
-    INVESTIGATION_AGENT --> MCP
-    MCP --> ASSERTIONS
-    MCP --> JOURNAL
+    INVESTIGATION_AGENT --> CONTEXT_TOOL
+    INVESTIGATION_AGENT --> AGENT_JOURNAL
+    CONTEXT_TOOL --> ASSERTIONS
+    CONTEXT_TOOL --> JOURNAL
+    CONTEXT_TOOL --> MEMORY
     ASSERTIONS --> VERDICT
     JOURNAL --> VERDICT
 
@@ -137,10 +160,12 @@ flowchart TB
     API --> DASHBOARD
 ```
 
-The next milestone adds Bedrock agents and semantic retrieval through CockroachDB's
-Distributed Vector Index. The current exact route, service, and dispute-symptom lookup
-remains the deterministic fallback. Managed MCP then follows, before the public API,
-dashboard, AWS deployment, observability, and access-control hardening.
+The next milestone extends the Bedrock agent layer and adds semantic retrieval through
+CockroachDB's Distributed Vector Index. First, the current Investigation Agent must be
+validated with a real Bedrock request ID. The exact route, service, and dispute-symptom
+lookup remains the deterministic fallback. Managed MCP then replaces the local read-only
+tool boundary, before the public API, dashboard, AWS deployment, observability, and
+access-control hardening.
 
 ## Demo data and safety
 
