@@ -94,7 +94,10 @@ def main(argv: list[str] | None = None) -> int:
             aws_region=args.aws_region,
         )
     except InvestigationAgentError as error:
-        print(json.dumps({"error": str(error)}), file=sys.stderr)
+        failure = {"error": str(error)}
+        if error.run_id is not None:
+            failure["agent_run_id"] = str(error.run_id)
+        print(json.dumps(failure), file=sys.stderr)
         return 1
     return 0
 

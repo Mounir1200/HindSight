@@ -2,6 +2,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+MAX_OUTPUT_TOKENS = 1_200
+
 
 @dataclass(frozen=True, slots=True)
 class ConverseResponse:
@@ -55,7 +57,7 @@ class BedrockConverseClient:
             system=[{"text": system_prompt}],
             messages=messages,
             toolConfig=tool_config,
-            inferenceConfig={"temperature": 0, "maxTokens": 800},
+            inferenceConfig={"temperature": 0, "maxTokens": MAX_OUTPUT_TOKENS},
             requestMetadata=request_metadata,
         )
         return _parse_response(response)

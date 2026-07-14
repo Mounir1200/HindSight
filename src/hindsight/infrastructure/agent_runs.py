@@ -157,6 +157,7 @@ class CockroachAgentRunRepository:
         error: dict[str, Any],
         usage: dict[str, int],
         completed_at: datetime,
+        stop_reason: str | None = None,
     ) -> AgentRunRecord:
         return self._finish(
             run_id,
@@ -164,6 +165,7 @@ class CockroachAgentRunRepository:
             completed_at,
             error=error,
             usage=usage,
+            stop_reason=stop_reason,
         )
 
     def get(self, run_id: UUID) -> AgentRunRecord:
@@ -238,6 +240,7 @@ class CockroachAgentRunRepository:
                 error=error or {"code": "unknown", "retryable": False},
                 usage=usage or {},
                 completed_at=completed_at,
+                stop_reason=stop_reason,
             )
 
         return self._write(operation, recover)

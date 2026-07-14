@@ -38,7 +38,7 @@ def test_bedrock_adapter_sends_bounded_converse_request() -> None:
         "system": [{"text": "Use the evidence tool."}],
         "messages": [{"role": "user", "content": [{"text": "Investigate."}]}],
         "toolConfig": {"tools": []},
-        "inferenceConfig": {"temperature": 0, "maxTokens": 800},
+        "inferenceConfig": {"temperature": 0, "maxTokens": 1_200},
         "requestMetadata": {"run_id": "run-1"},
     }
     assert response.request_id == "aws-request-1"

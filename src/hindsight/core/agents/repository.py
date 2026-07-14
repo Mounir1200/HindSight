@@ -32,6 +32,7 @@ class AgentRunRepository(Protocol):
         error: dict[str, Any],
         usage: dict[str, int],
         completed_at: datetime,
+        stop_reason: str | None = None,
     ) -> AgentRunRecord: ...
 
     def get(self, run_id: UUID) -> AgentRunRecord: ...
@@ -96,6 +97,7 @@ class InMemoryAgentRunRepository:
         error: dict[str, Any],
         usage: dict[str, int],
         completed_at: datetime,
+        stop_reason: str | None = None,
     ) -> AgentRunRecord:
         current = self.get(run_id)
         failed = replace(
@@ -105,6 +107,7 @@ class InMemoryAgentRunRepository:
             completed_at=completed_at,
             error=error,
             usage=usage,
+            stop_reason=stop_reason,
         )
         return self._finish(current, failed)
 

@@ -72,8 +72,11 @@ uv run --env-file .env hindsight demo --cockroach --bedrock
 The command fails closed if the model skips the evidence tool, requests another case,
 uses an unknown tool, returns no final explanation, or exceeds the fixed turn/tool
 budgets. The model only explains an already computed result: it cannot change a verdict,
-amount, invoice, refund, or remediation. A real Bedrock run still needs to be captured;
-the repository currently validates orchestration locally with an injected scripted client.
+amount, invoice, refund, or remediation. The live Nova 2 Lite proof completed with two AWS
+request IDs and one successful read-only tool call. The injected scripted client remains in
+focused tests for deterministic validation. The advisory answer is requested in at most 220
+words and hard-capped at 1,200 output tokens; incomplete provider responses fail closed with
+their exact stop reason and durable run ID.
 Bedrock itself is not transactionally exactly-once: a new CLI invocation creates a new
 audited run, while the only external tool in this milestone is read-only and replay-safe.
 
@@ -103,7 +106,7 @@ flowchart TB
     subgraph AWS["AWS application layer"]
         INGEST["○ S3 + Lambda ingestion"]
         BILLING_AGENT["○ Bedrock Billing Agent"]
-        INVESTIGATION_AGENT["▶ Bedrock Investigation Agent<br/>Converse integration ready"]
+        INVESTIGATION_AGENT["✅ Bedrock Investigation Agent<br/>live Converse tool use"]
         REMEDIATION_AGENT["○ Bedrock Remediation Agent"]
         API["○ Web API"]
     end
@@ -122,7 +125,7 @@ flowchart TB
         OPERATIONS["✅ CDRs, invoices, disputes,<br/>refunds and incidents"]
         MEMORY["✅ Procedural memory +<br/>bi-temporal retrieval"]
         AGENT_JOURNAL["✅ Agent runs + tool calls"]
-        VECTOR["○ Distributed Vector Index"]
+        VECTOR["▶ Distributed Vector Index"]
         MCP["○ Managed MCP Server<br/>read-only investigation"]
     end
 
@@ -160,12 +163,10 @@ flowchart TB
     API --> DASHBOARD
 ```
 
-The next milestone extends the Bedrock agent layer and adds semantic retrieval through
-CockroachDB's Distributed Vector Index. First, the current Investigation Agent must be
-validated with a real Bedrock request ID. The exact route, service, and dispute-symptom
-lookup remains the deterministic fallback. Managed MCP then replaces the local read-only
-tool boundary, before the public API, dashboard, AWS deployment, observability, and
-access-control hardening.
+The next milestone adds semantic retrieval through CockroachDB's Distributed Vector Index.
+The exact route, service, and dispute-symptom lookup remains the deterministic fallback.
+Managed MCP then replaces the local read-only tool boundary, before the public API,
+dashboard, AWS deployment, observability, and access-control hardening.
 
 ## Demo data and safety
 

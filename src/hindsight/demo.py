@@ -170,8 +170,7 @@ def run_demo_workflow(
             "after_memory": _guidance_payload(after_memory),
             "measured_change": {
                 "checklist_items_loaded": (
-                    after_memory.procedure_steps_reused
-                    - before_memory.procedure_steps_reused
+                    after_memory.procedure_steps_reused - before_memory.procedure_steps_reused
                 ),
                 "recommendation_changed": (
                     before_memory.recommendation != after_memory.recommendation
@@ -274,19 +273,20 @@ def _investigation_context(
     dispute_id: UUID,
     guidance: InvestigationGuidance,
 ) -> dict[str, object]:
+    current_truth = audit.snapshot.current_truth
     return {
         "case_id": dispute_id,
         "decision": {
             "id": journal.record.id,
-            "event_time": audit.lookup.event_time,
-            "decided_at": audit.lookup.decision_time,
+            "event_occurred_at": audit.lookup.event_time,
+            "decision_made_at": audit.lookup.decision_time,
             "selected_assertion_id": audit.decision.selected_assertion_id,
         },
         "current_truth": {
-            "assertion_id": audit.snapshot.current_truth.id,
-            "rate": audit.snapshot.current_truth.value_number,
-            "valid_from": audit.snapshot.current_truth.valid_from,
-            "recorded_at": audit.snapshot.current_truth.recorded_at,
+            "assertion_id": current_truth.id,
+            "rate": current_truth.value_number,
+            "valid_from": current_truth.valid_from,
+            "recorded_at": current_truth.recorded_at,
         },
         "known_at_decision": {
             "assertion_id": audit.snapshot.known_at_decision.id,
@@ -308,6 +308,9 @@ def _investigation_context(
             "category": audit.verdict.verdict,
             "agent_fault": audit.verdict.agent_fault,
             "knowledge_gap_seconds": audit.verdict.knowledge_gap_seconds,
+            "knowledge_gap_definition": (
+                "current_truth.recorded_at_minus_current_truth.valid_from"
+            ),
             "root_cause": audit.verdict.root_cause,
         },
         "procedural_guidance": _guidance_payload(guidance),

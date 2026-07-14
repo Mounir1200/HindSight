@@ -16,8 +16,8 @@ from hindsight.core.agents.models import (
 from hindsight.core.agents.repository import AgentRunRepository
 
 TOOL_NAME = "get_investigation_context"
-PROMPT_VERSION = "investigation-v1"
-TOOLSET_VERSION = "telecom-readonly-v1"
+PROMPT_VERSION = "investigation-v3"
+TOOLSET_VERSION = "telecom-readonly-v2"
 MAX_MODEL_TURNS = 3
 MAX_TOOL_CALLS = 1
 MAX_TOOL_RESULT_BYTES = 64_000
@@ -26,9 +26,17 @@ MAX_EXPLANATION_CHARS = 10_000
 SYSTEM_PROMPT = """You are the HindSight investigation explanation agent.
 You must call get_investigation_context before answering and use only its returned facts.
 The deterministic temporal engine owns the verdict and the telecom adapter owns all amounts.
-Do not recalculate, override, or mutate them. Explain the event timeline, the knowledge boundary,
-agent fault, the confirmed root cause, and any advisory procedure in concise language. Clearly
-label the explanation and procedural guidance as advisory."""
+Do not recalculate, override, or mutate them. Timestamp semantics are strict:
+decision.event_occurred_at is the domain event time, decision.decision_made_at is the decision
+time, current_truth.valid_from is business validity, and current_truth.recorded_at is when the
+system learned the truth. knowledge_gap_seconds is current_truth.recorded_at minus
+current_truth.valid_from, not elapsed time after the decision. Never invent or rename events or
+timestamps, and never derive durations. Do not invent a dispute resolution time. Explain the
+event timeline, knowledge boundary, agent fault, confirmed root cause, and advisory procedure
+concisely. Return at most 220 words in exactly five labeled bullets: Timeline, Knowledge
+boundary, Accountability, Root cause, and Advisory procedure. Do not repeat identifiers unless
+needed to distinguish evidence. Clearly label the explanation and procedural guidance as
+advisory."""
 
 TOOL_CONFIG: dict[str, Any] = {
     "tools": [
@@ -102,6 +110,7 @@ class _ConversationAccounting:
     usage: dict[str, int] = field(default_factory=dict)
     request_ids: list[str] = field(default_factory=list)
     model_turns: int = 0
+    stop_reason: str | None = None
 
 
 class InvestigationAgent:
@@ -175,15 +184,19 @@ class InvestigationAgent:
                     error=failure,
                     usage=accounting.usage,
                     completed_at=self._clock(),
+                    stop_reason=accounting.stop_reason,
                 )
             except Exception as journal_error:
                 raise InvestigationAgentError(
-                    "agent execution and durable failure journaling both failed"
+                    "agent execution and durable failure journaling both failed",
+                    run_id=run_id,
                 ) from journal_error
             if isinstance(error, InvestigationAgentError):
+                error.run_id = run_id
                 raise
             raise InvestigationAgentError(
-                f"Bedrock investigation failed; inspect agent run {run_id}"
+                "Bedrock investigation failed",
+                run_id=run_id,
             ) from error
 
     def _run_conversation(
@@ -220,6 +233,7 @@ class InvestigationAgent:
                 },
             )
             accounting.model_turns = model_turn
+            accounting.stop_reason = response.stop_reason
             _merge_usage(accounting.usage, response.usage)
             if response.request_id:
                 accounting.request_ids.append(response.request_id)
@@ -256,7 +270,7 @@ class InvestigationAgent:
             if response.stop_reason != "end_turn":
                 raise AgentProtocolError(
                     "unsupported_stop_reason",
-                    "Bedrock did not finish the investigation safely",
+                    f"Bedrock stopped with {response.stop_reason}; the explanation is incomplete",
                 )
             if tool_call_count == 0:
                 raise AgentProtocolError(
@@ -474,11 +488,14 @@ def _failure_payload(
         **failure,
         "request_ids": accounting.request_ids,
         "model_turns": accounting.model_turns,
+        "provider_stop_reason": accounting.stop_reason,
     }
 
 
 class InvestigationAgentError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, run_id: UUID | None = None) -> None:
+        super().__init__(message)
+        self.run_id = run_id
 
 
 class AgentProtocolError(InvestigationAgentError):
