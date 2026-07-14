@@ -7,6 +7,11 @@ from typing import Protocol
 from uuid import UUID
 
 from hindsight.core.decisions.models import DecisionAudit, DecisionJournalEntry
+from hindsight.core.memory import (
+    ProceduralMemoryHit,
+    ProceduralMemoryLookup,
+    ProceduralMemoryRetrieval,
+)
 
 
 class RemediationOutcome(StrEnum):
@@ -96,6 +101,8 @@ class TelecomRemediationPlan:
             )
         ):
             raise ValueError("remediation text fields cannot be empty")
+        if any(not item for item in self.memory_checklist):
+            raise ValueError("remediation checklist items cannot be empty")
 
     @property
     def refund_amount(self) -> Decimal:
@@ -155,6 +162,7 @@ class _InMemoryCase:
     dispute_status: str = "open"
     request: dict[str, object] | None = None
     receipt: RemediationReceipt | None = None
+    plan: TelecomRemediationPlan | None = None
 
 
 class InMemoryTelecomRemediationRepository:
@@ -209,17 +217,14 @@ class InMemoryTelecomRemediationRepository:
             state.dispute_status = "closed"
             state.request = request
             state.receipt = receipt
+            state.plan = plan
             return receipt
 
     def snapshot(self, dispute_id: UUID, memory_key: str) -> TelecomCaseSnapshot:
         with self._lock:
             state = self._required_case(dispute_id)
             receipt = state.receipt
-            has_memory = (
-                receipt is not None
-                and state.request is not None
-                and state.request["memory_key"] == memory_key
-            )
+            has_memory = state.plan is not None and state.plan.memory_key == memory_key
             return TelecomCaseSnapshot(
                 invoice_amount=state.invoice_amount,
                 invoice_status=state.invoice_status,
@@ -231,6 +236,32 @@ class InMemoryTelecomRemediationRepository:
                 procedural_memory_count=int(has_memory),
                 remediation_run_count=int(receipt is not None),
             )
+
+    def retrieve(
+        self,
+        lookup: ProceduralMemoryLookup,
+    ) -> ProceduralMemoryRetrieval:
+        with self._lock:
+            candidates = [
+                state.plan
+                for state in self._cases.values()
+                if state.plan is not None
+                and lookup.domain == "telecom"
+                and lookup.namespace == "revenue_assurance"
+                and state.seed.route == lookup.route
+                and state.seed.service_type == lookup.service_type
+                and state.seed.claim == lookup.symptom
+                and state.plan.completed_at <= lookup.applicable_at
+                and state.plan.completed_at <= lookup.known_at
+                and state.plan.dispute_id != lookup.exclude_source_dispute_id
+            ]
+            candidates.sort(key=lambda plan: str(plan.memory_id))
+            candidates.sort(key=lambda plan: plan.completed_at, reverse=True)
+            hits = tuple(
+                _memory_hit(plan, rank)
+                for rank, plan in enumerate(candidates[: lookup.limit], start=1)
+            )
+            return ProceduralMemoryRetrieval(lookup, "structured_exact", hits)
 
     def _required_case(self, dispute_id: UUID) -> _InMemoryCase:
         try:
@@ -352,6 +383,21 @@ def _validate_case(state: _InMemoryCase, plan: TelecomRemediationPlan) -> None:
         raise RemediationConflictError("invoice amount changed before remediation")
     if state.invoice_status != "issued" or state.dispute_status != "open":
         raise RemediationStateError("telecom case is not open for remediation")
+
+
+def _memory_hit(plan: TelecomRemediationPlan, rank: int) -> ProceduralMemoryHit:
+    return ProceduralMemoryHit(
+        memory_id=plan.memory_id,
+        memory_key=plan.memory_key,
+        source_dispute_id=plan.dispute_id,
+        corrected_assertion_id=plan.corrected_assertion_id,
+        remediation_run_id=plan.run_id,
+        root_cause=plan.root_cause,
+        content=plan.memory_content,
+        checklist=plan.memory_checklist,
+        recorded_at=plan.completed_at,
+        rank=rank,
+    )
 
 
 def _validate_remediation_context(

@@ -21,6 +21,11 @@ from hindsight.adapters.telecom.remediation import (
     serialize_remediation_request,
     serialize_remediation_result,
 )
+from hindsight.core.memory import (
+    ProceduralMemoryHit,
+    ProceduralMemoryLookup,
+    ProceduralMemoryRetrieval,
+)
 
 INSERT_CDR_SQL = """
 INSERT INTO telecom_cdrs (
@@ -217,6 +222,38 @@ SELECT
 FROM telecom_disputes AS dispute
 JOIN telecom_invoices AS invoice ON invoice.id = dispute.invoice_id
 WHERE dispute.id = %s
+"""
+
+SELECT_PROCEDURAL_MEMORIES_SQL = """
+SELECT
+  memory.id,
+  memory.memory_key,
+  memory.remediation_run_id,
+  memory.content,
+  memory.content_struct,
+  memory.recorded_at
+FROM memories AS memory
+JOIN telecom_refunds AS refund
+  ON refund.remediation_run_id = memory.remediation_run_id
+JOIN telecom_disputes AS dispute ON dispute.id = refund.dispute_id
+JOIN telecom_invoices AS invoice ON invoice.id = dispute.invoice_id
+JOIN telecom_cdrs AS cdr ON cdr.id = invoice.cdr_id
+WHERE memory.domain = %s
+  AND memory.namespace = %s
+  AND memory.kind = 'procedure'
+  AND cdr.route = %s
+  AND cdr.service_type = %s
+  AND dispute.claim = %s
+  AND memory.valid_from <= %s
+  AND (memory.valid_until IS NULL OR memory.valid_until > %s)
+  AND memory.recorded_at <= %s
+  AND (memory.superseded_at IS NULL OR memory.superseded_at > %s)
+  AND (
+    CAST(%s AS UUID) IS NULL
+    OR refund.dispute_id <> %s
+  )
+ORDER BY memory.confidence DESC, memory.recorded_at DESC, memory.id
+LIMIT %s
 """
 
 
@@ -477,6 +514,35 @@ class CockroachTelecomRemediationRepository:
                 remediation_run_count=int(row["remediation_run_count"]),
             )
 
+    def retrieve(
+        self,
+        lookup: ProceduralMemoryLookup,
+    ) -> ProceduralMemoryRetrieval:
+        excluded = lookup.exclude_source_dispute_id
+        with self._lock:
+            rows = self._connection.execute(
+                SELECT_PROCEDURAL_MEMORIES_SQL,
+                (
+                    lookup.domain,
+                    lookup.namespace,
+                    lookup.route,
+                    lookup.service_type,
+                    lookup.symptom,
+                    lookup.applicable_at,
+                    lookup.applicable_at,
+                    lookup.known_at,
+                    lookup.known_at,
+                    excluded,
+                    excluded,
+                    lookup.limit,
+                ),
+            ).fetchall()
+        hits = tuple(
+            _memory_hit_from_row(row, rank)
+            for rank, row in enumerate(rows, start=1)
+        )
+        return ProceduralMemoryRetrieval(lookup, "structured_exact", hits)
+
     def _validate_seed(
         self,
         row: Mapping[str, Any],
@@ -646,6 +712,30 @@ def _json_object(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError("remediation JSON must be an object")
     return value
+
+
+def _memory_hit_from_row(
+    row: Mapping[str, Any],
+    rank: int,
+) -> ProceduralMemoryHit:
+    structure = _json_object(row["content_struct"])
+    checklist = structure.get("checklist")
+    if not isinstance(checklist, list) or not all(
+        isinstance(item, str) and item for item in checklist
+    ):
+        raise ValueError("procedural memory checklist is invalid")
+    return ProceduralMemoryHit(
+        memory_id=UUID(str(row["id"])),
+        memory_key=str(row["memory_key"]),
+        source_dispute_id=UUID(str(structure["source_dispute_id"])),
+        corrected_assertion_id=UUID(str(structure["corrected_assertion_id"])),
+        remediation_run_id=UUID(str(row["remediation_run_id"])),
+        root_cause=str(structure["root_cause"]),
+        content=str(row["content"]),
+        checklist=tuple(checklist),
+        recorded_at=row["recorded_at"],
+        rank=rank,
+    )
 
 
 def _decimal(value: object) -> Decimal:

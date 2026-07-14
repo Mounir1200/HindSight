@@ -20,11 +20,16 @@ This repository currently implements the deterministic P0 foundation:
 - a serializable, idempotent remediation that corrects the invoice, creates one refund,
   closes the dispute, and opens one ingestion incident atomically;
 - procedural memory written in the same CockroachDB transaction;
+- bi-temporal procedural retrieval that guides a second, similar investigation without
+  changing its deterministic verdict or financial calculation;
 - idempotent demo data, focused tests, and a CLI proof with a safe replay.
 
 The demo proves that a EUR 0.15 rate is current truth while the billing agent could only
 know and select the EUR 0.25 rate on July 2, 2026. The resulting verdict is
-`wrong_not_knowable`.
+`wrong_not_knowable`. A later dispute on the same route and service retrieves the prior
+procedure before its audit, proposes a root cause, and loads four reusable verification
+steps. The deterministic audit then confirms the suggestion; memory remains advisory and
+is never an input to the verdict or financial calculation.
 
 ## Run with uv
 
@@ -88,13 +93,14 @@ flowchart TB
         BILLING["✅ Telecom billing calculation"]
         VERDICT["✅ Evidence-based verdict engine"]
         REMEDIATION["✅ Serializable idempotent remediation"]
+        GUIDANCE["✅ Memory-guided investigation"]
     end
 
     subgraph CRDB["CockroachDB — durable agent memory"]
         ASSERTIONS["✅ Bi-temporal assertions"]
         JOURNAL["✅ Decisions + evidence journal"]
         OPERATIONS["✅ CDRs, invoices, disputes,<br/>refunds and incidents"]
-        MEMORY["✅ Procedural memory persistence"]
+        MEMORY["✅ Procedural memory +<br/>bi-temporal retrieval"]
         VECTOR["○ Distributed Vector Index"]
         MCP["○ Managed MCP Server<br/>read-only investigation"]
     end
@@ -120,6 +126,8 @@ flowchart TB
     REMEDIATION_AGENT --> REMEDIATION
     REMEDIATION --> OPERATIONS
     REMEDIATION --> MEMORY
+    MEMORY --> GUIDANCE
+    GUIDANCE --> INVESTIGATION_AGENT
     MEMORY --> VECTOR
     VECTOR --> INVESTIGATION_AGENT
 
@@ -129,10 +137,10 @@ flowchart TB
     API --> DASHBOARD
 ```
 
-The next proof will retrieve procedural memory during a second investigation and measure
-whether it improves the workflow. Bedrock agents, Managed MCP and vector retrieval then
-follow, before the public API, dashboard, AWS deployment, observability, and access-control
-hardening.
+The next milestone adds Bedrock agents and semantic retrieval through CockroachDB's
+Distributed Vector Index. The current exact route, service, and dispute-symptom lookup
+remains the deterministic fallback. Managed MCP then follows, before the public API,
+dashboard, AWS deployment, observability, and access-control hardening.
 
 ## Demo data and safety
 
