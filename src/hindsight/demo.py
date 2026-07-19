@@ -1,29 +1,35 @@
 from typing import Protocol, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from hindsight.adapters.telecom.billing import TelecomAdapter
 from hindsight.adapters.telecom.investigation import (
     InvestigationGuidance,
     build_investigation_guidance,
 )
-from hindsight.adapters.telecom.models import CallEvent
 from hindsight.adapters.telecom.remediation import (
     RemediationReceipt,
     TelecomRemediationRepository,
 )
 from hindsight.adapters.telecom.seed import (
     DEMO_DISPUTE_CLAIM,
+    DEMO_INCIDENT_ID,
+    DEMO_MEMORY_ID,
+    DEMO_REFUND_ID,
+    DEMO_REMEDIATION_END,
+    DEMO_REMEDIATION_RUN_ID,
+    DEMO_REMEDIATION_START,
     DEMO_ROUTE,
     DEMO_SERVICE_TYPE,
-    DEMO_TARIFF_KEY,
     FOLLOW_UP_DEMO_CASE,
     PRIMARY_DEMO_CASE,
-    DemoCase,
     demo_call,
     demo_case_seed,
-    demo_remediation_plan,
     seed_demo,
 )
+from hindsight.agents.advisory import AdvisoryClient
+from hindsight.agents.billing import BillingAgent
+from hindsight.agents.remediation import RemediationAgent
+from hindsight.core.agents.repository import AgentRunRepository, InMemoryAgentRunRepository
 from hindsight.core.assertions.repository import AssertionRepository
 from hindsight.core.assertions.service import TemporalAssertionService
 from hindsight.core.decisions.models import DecisionAudit, DecisionJournalEntry
@@ -49,19 +55,63 @@ def run_demo_workflow(
     *,
     vector_memory: DemoVectorMemory | None = None,
     include_investigation_context: bool = False,
+    agent_run_repository: AgentRunRepository | None = None,
+    advisory_client: AdvisoryClient | None = None,
+    correlation_id: UUID | None = None,
 ) -> dict[str, object]:
     assertions = TemporalAssertionService(assertion_repository)
     seed_demo(assertions)
     audit_service = DecisionAuditService(assertions, TelecomAdapter())
     journal_service = DecisionJournalService(decision_repository)
-    audit = _audit_case(audit_service, PRIMARY_DEMO_CASE)
-    journal = _record_case(journal_service, audit, PRIMARY_DEMO_CASE)
+    run_repository = agent_run_repository or InMemoryAgentRunRepository()
+    correlation_id = correlation_id or uuid4()
+    billing = BillingAgent(
+        audit_service,
+        journal_service,
+        run_repository,
+        advisor=advisory_client,
+    ).run(
+        demo_call(PRIMARY_DEMO_CASE),
+        decision_id=PRIMARY_DEMO_CASE.decision_id,
+        decision_time=PRIMARY_DEMO_CASE.decision_time,
+        investigated_at=PRIMARY_DEMO_CASE.investigation_time,
+        correlation_id=correlation_id,
+    )
+    audit = billing.audit
+    journal = billing.journal
     case = demo_case_seed(audit, journal, PRIMARY_DEMO_CASE)
     remediation_repository.seed_case(case)
 
-    plan = demo_remediation_plan(audit, journal, case)
-    first_attempt = remediation_repository.apply_remediation(plan)
-    second_attempt = remediation_repository.apply_remediation(plan)
+    remediation_agent = RemediationAgent(
+        remediation_repository,
+        run_repository,
+        advisor=advisory_client,
+    )
+    remediation_arguments = {
+        "remediation_run_id": DEMO_REMEDIATION_RUN_ID,
+        "refund_id": DEMO_REFUND_ID,
+        "incident_id": DEMO_INCIDENT_ID,
+        "memory_id": DEMO_MEMORY_ID,
+        "started_at": DEMO_REMEDIATION_START,
+        "completed_at": DEMO_REMEDIATION_END,
+    }
+    first_remediation = remediation_agent.run(
+        audit,
+        journal,
+        case,
+        correlation_id=correlation_id,
+        **remediation_arguments,
+    )
+    replayed_remediation = remediation_agent.run(
+        audit,
+        journal,
+        case,
+        correlation_id=correlation_id,
+        **remediation_arguments,
+    )
+    plan = first_remediation.plan
+    first_attempt = first_remediation.receipt
+    second_attempt = replayed_remediation.receipt
     final_state = remediation_repository.snapshot(plan.dispute_id, plan.memory_key)
     embedding_receipt = (
         vector_memory.index(first_attempt.memory_id) if vector_memory is not None else None
@@ -85,12 +135,19 @@ def run_demo_workflow(
         symptom=DEMO_DISPUTE_CLAIM,
         as_of=FOLLOW_UP_DEMO_CASE.investigation_time,
     )
-    follow_up_audit = _audit_case(audit_service, FOLLOW_UP_DEMO_CASE)
-    follow_up_journal = _record_case(
+    follow_up_billing = BillingAgent(
+        audit_service,
         journal_service,
-        follow_up_audit,
-        FOLLOW_UP_DEMO_CASE,
+        run_repository,
+    ).run(
+        demo_call(FOLLOW_UP_DEMO_CASE),
+        decision_id=FOLLOW_UP_DEMO_CASE.decision_id,
+        decision_time=FOLLOW_UP_DEMO_CASE.decision_time,
+        investigated_at=FOLLOW_UP_DEMO_CASE.investigation_time,
+        correlation_id=correlation_id,
     )
+    follow_up_audit = follow_up_billing.audit
+    follow_up_journal = follow_up_billing.journal
     follow_up_case = demo_case_seed(
         follow_up_audit,
         follow_up_journal,
@@ -101,6 +158,18 @@ def run_demo_workflow(
     payload = {
         "scenario": "retroactive_telecom_rate",
         "backend": backend,
+        "agent_execution": {
+            "correlation_id": correlation_id,
+            "billing_run_id": billing.run_id,
+            "billing_advisory_status": billing.advisory.status,
+            "remediation_run_ids": [
+                first_remediation.run_id,
+                replayed_remediation.run_id,
+            ],
+            "remediation_advisory_status": first_remediation.advisory.status,
+            "replay_advisory_status": replayed_remediation.advisory.status,
+            "follow_up_billing_run_id": follow_up_billing.run_id,
+        },
         "current_truth": {
             "assertion_id": audit.snapshot.current_truth.id,
             "rate": audit.snapshot.current_truth.value_number,
@@ -131,6 +200,7 @@ def run_demo_workflow(
             "selected_assertion_id": audit.decision.selected_assertion_id,
             "event_time": journal.record.event_time,
             "decided_at": journal.record.decided_at,
+            "investigated_at": journal.record.investigated_at,
             "selected_rate": audit.decision.selected_value,
             **audit.decision.output,
         },
@@ -204,7 +274,11 @@ def run_demo_workflow(
                 "dispute_id": follow_up_case.dispute_id,
                 "opened_at": follow_up_case.opened_at,
                 "decision_id": follow_up_journal.record.id,
+                "audited_at": follow_up_journal.record.investigated_at,
                 "verdict": follow_up_audit.verdict.verdict,
+                "agent_fault": follow_up_audit.verdict.agent_fault,
+                "knowledge_gap_seconds": (follow_up_audit.verdict.knowledge_gap_seconds),
+                "root_cause": follow_up_audit.verdict.root_cause,
                 **follow_up_audit.comparison.details,
             },
             "before_memory": _guidance_payload(before_memory),
@@ -251,42 +325,6 @@ def run_demo_workflow(
             after_memory,
         )
     return payload
-
-
-def _audit_case(
-    service: DecisionAuditService[CallEvent],
-    case: DemoCase,
-) -> DecisionAudit:
-    return service.audit(
-        event=demo_call(case),
-        subject_id=DEMO_TARIFF_KEY,
-        event_time=case.event_time,
-        decision_time=case.decision_time,
-    )
-
-
-def _record_case(
-    service: DecisionJournalService,
-    audit: DecisionAudit,
-    case: DemoCase,
-) -> DecisionJournalEntry:
-    call = demo_call(case)
-    return service.record(
-        audit,
-        decision_id=case.decision_id,
-        agent_id="billing_agent",
-        action="calculate_call_charge",
-        subject_type="telecom_call",
-        subject_id=case.call_id,
-        investigated_at=case.investigation_time,
-        input={
-            "call_id": call.id,
-            "tariff_key": call.tariff_key,
-            "started_at": call.started_at,
-            "duration_seconds": call.duration_seconds,
-        },
-        rationale="Selected the latest tariff known at decision time.",
-    )
 
 
 def _guidance_payload(guidance: InvestigationGuidance) -> dict[str, object]:

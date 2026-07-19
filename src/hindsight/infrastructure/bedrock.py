@@ -48,37 +48,53 @@ class BedrockConverseClient:
         *,
         system_prompt: str,
         messages: list[dict[str, Any]],
-        tool_config: dict[str, Any],
+        tool_config: dict[str, Any] | None,
         request_metadata: dict[str, str],
+        max_output_tokens: int = MAX_OUTPUT_TOKENS,
     ) -> ConverseResponse:
-        _validate_request(system_prompt, messages, tool_config, request_metadata)
-        response = self._client.converse(
-            modelId=self._model_id,
-            system=[{"text": system_prompt}],
-            messages=messages,
-            toolConfig=tool_config,
-            inferenceConfig={"temperature": 0, "maxTokens": MAX_OUTPUT_TOKENS},
-            requestMetadata=request_metadata,
+        _validate_request(
+            system_prompt,
+            messages,
+            tool_config,
+            request_metadata,
+            max_output_tokens,
         )
+        request = {
+            "modelId": self._model_id,
+            "system": [{"text": system_prompt}],
+            "messages": messages,
+            "inferenceConfig": {"temperature": 0, "maxTokens": max_output_tokens},
+            "requestMetadata": request_metadata,
+        }
+        if tool_config is not None:
+            request["toolConfig"] = tool_config
+        response = self._client.converse(**request)
         return _parse_response(response)
 
 
 def _validate_request(
     system_prompt: str,
     messages: list[dict[str, Any]],
-    tool_config: dict[str, Any],
+    tool_config: dict[str, Any] | None,
     request_metadata: dict[str, str],
+    max_output_tokens: int,
 ) -> None:
     if not isinstance(system_prompt, str) or not system_prompt.strip():
         raise ValueError("system_prompt cannot be empty")
     if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
         raise TypeError("messages must be a list of dictionaries")
-    if not isinstance(tool_config, dict):
-        raise TypeError("tool_config must be a dictionary")
+    if tool_config is not None and not isinstance(tool_config, dict):
+        raise TypeError("tool_config must be a dictionary or None")
     if not isinstance(request_metadata, dict) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in request_metadata.items()
     ):
         raise TypeError("request_metadata must map strings to strings")
+    if (
+        isinstance(max_output_tokens, bool)
+        or not isinstance(max_output_tokens, int)
+        or not 1 <= max_output_tokens <= MAX_OUTPUT_TOKENS
+    ):
+        raise ValueError("max_output_tokens is outside the allowed range")
 
 
 def _parse_response(response: object) -> ConverseResponse:

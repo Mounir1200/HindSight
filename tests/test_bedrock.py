@@ -1,5 +1,6 @@
 from typing import Any
 
+from hindsight.agents.advisory import MAX_ADVISORY_TOKENS, BedrockAdvisoryClient
 from hindsight.infrastructure.bedrock import BedrockConverseClient
 
 
@@ -43,3 +44,22 @@ def test_bedrock_adapter_sends_bounded_converse_request() -> None:
     }
     assert response.request_id == "aws-request-1"
     assert response.stop_reason == "end_turn"
+
+
+def test_bedrock_advisory_has_no_tools_and_a_smaller_output_budget() -> None:
+    runtime = RecordingBedrockRuntime()
+    advisor = BedrockAdvisoryClient(BedrockConverseClient("test-model", "eu-central-1", runtime))
+
+    response = advisor.generate(
+        purpose="billing_explanation",
+        facts={"amount": "2.50", "currency": "EUR"},
+        request_metadata={"run_id": "run-1"},
+    )
+
+    assert runtime.request is not None
+    assert "toolConfig" not in runtime.request
+    assert runtime.request["inferenceConfig"] == {
+        "temperature": 0,
+        "maxTokens": MAX_ADVISORY_TOKENS,
+    }
+    assert response.text == "Advisory explanation."

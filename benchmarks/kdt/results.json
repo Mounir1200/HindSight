@@ -1,0 +1,34 @@
+{
+  "benchmark": "kdt-synthetic-v1",
+  "scope": "35 controlled synthetic temporal-accountability scenarios",
+  "scenario_count": 35,
+  "family_counts": {
+    "correct": 5,
+    "inaccessible": 5,
+    "late_recording": 5,
+    "not_presented": 5,
+    "not_retrieved": 5,
+    "presented_ignored": 5,
+    "untrusted_override": 5
+  },
+  "metrics": {
+    "truth_reconstruction_accuracy_pct": 100.0,
+    "knowledge_reconstruction_accuracy_pct": 100.0,
+    "retrieval_attribution_accuracy_pct": 100.0,
+    "verdict_accuracy_pct": 100.0,
+    "root_cause_accuracy_pct": 100.0,
+    "unjustified_blame_rate_pct": 0.0,
+    "provenance_completeness_pct": 100.0,
+    "duplicate_remediation_rate_pct": 0.0,
+    "idempotent_remediation_pct": 100.0,
+    "procedural_memory_reuse_pct": 100.0
+  },
+  "targets": {
+    "verdict_accuracy_pct": ">=90",
+    "unjustified_blame_rate_pct": "<=5",
+    "provenance_completeness_pct": "=100",
+    "duplicate_remediation_rate_pct": "=0",
+    "idempotent_remediation_pct": "=100"
+  },
+  "passed": true
+}

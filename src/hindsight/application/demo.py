@@ -1,8 +1,10 @@
 from typing import cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from hindsight.adapters.telecom.remediation import InMemoryTelecomRemediationRepository
+from hindsight.agents.advisory import BedrockAdvisoryClient
 from hindsight.agents.investigation import InvestigationAgent
+from hindsight.core.agents.repository import InMemoryAgentRunRepository
 from hindsight.core.assertions.repository import (
     CockroachAssertionRepository,
     InMemoryAssertionRepository,
@@ -43,11 +45,13 @@ def execute_demo(
     mcp_api_key: str | None = None,
 ) -> dict[str, object]:
     connection = connect_database(database_url) if database_url else None
+    correlation_id = uuid4()
     try:
         if connection is None:
             assertion_repository = InMemoryAssertionRepository()
             decision_repository = InMemoryDecisionRepository()
             remediation_repository = InMemoryTelecomRemediationRepository()
+            agent_run_repository = InMemoryAgentRunRepository()
             backend = "in_memory"
         else:
             assertion_repository = CockroachAssertionRepository(connection)
@@ -56,7 +60,19 @@ def execute_demo(
                 connection,
                 connection_factory=lambda: connect_database(database_url),
             )
+            agent_run_repository = CockroachAgentRunRepository(
+                connection,
+                connection_factory=lambda: connect_database(database_url),
+            )
             backend = "cockroachdb"
+
+        bedrock_client = None
+        advisory_client = None
+        if bedrock_model_id:
+            if connection is None:
+                raise ValueError("Bedrock agents require CockroachDB for durable traces")
+            bedrock_client = BedrockConverseClient(bedrock_model_id, aws_region)
+            advisory_client = BedrockAdvisoryClient(bedrock_client)
 
         vector_memory = None
         if vector_enabled:
@@ -78,9 +94,12 @@ def execute_demo(
             backend,
             vector_memory=vector_memory,
             include_investigation_context=bedrock_model_id is not None,
+            agent_run_repository=agent_run_repository,
+            advisory_client=advisory_client,
+            correlation_id=correlation_id,
         )
         if bedrock_model_id:
-            if connection is None or database_url is None:
+            if connection is None or database_url is None or bedrock_client is None:
                 raise ValueError("Bedrock investigation requires CockroachDB")
             context_store = None
             context_reader = None
@@ -94,11 +113,9 @@ def execute_demo(
                 )
             _add_bedrock_investigation(
                 payload,
-                CockroachAgentRunRepository(
-                    connection,
-                    connection_factory=lambda: connect_database(database_url),
-                ),
-                BedrockConverseClient(bedrock_model_id, aws_region),
+                agent_run_repository,
+                bedrock_client,
+                correlation_id,
                 context_store=context_store,
                 context_reader=context_reader,
             )
@@ -112,6 +129,7 @@ def _add_bedrock_investigation(
     payload: dict[str, object],
     repository: CockroachAgentRunRepository,
     client: BedrockConverseClient,
+    correlation_id: UUID,
     *,
     context_store: CockroachInvestigationContextStore | None = None,
     context_reader: ManagedMcpInvestigationContextReader | None = None,
@@ -121,7 +139,11 @@ def _add_bedrock_investigation(
     case_id = UUID(str(context["case_id"]))
     context_snapshot_id = None
     if context_reader is None:
-        result = InvestigationAgent(client, repository).run(case_id=case_id, context=context)
+        result = InvestigationAgent(client, repository).run(
+            case_id=case_id,
+            context=context,
+            correlation_id=correlation_id,
+        )
     else:
         if context_store is None:
             raise ValueError("Managed MCP requires a durable context store")
@@ -131,18 +153,14 @@ def _add_bedrock_investigation(
             client,
             repository,
             context_reader=context_reader.for_snapshot(snapshot.id),
-        ).run(case_id=case_id)
+        ).run(case_id=case_id, correlation_id=correlation_id)
     persisted = repository.get(result.run_id)
     calls = repository.tool_calls(result.run_id)
     learning.pop("investigation_context")
     payload["bedrock_investigation"] = {
         "agent_run_id": persisted.id,
         "status": persisted.status,
-        **(
-            {"context_snapshot_id": context_snapshot_id}
-            if context_snapshot_id is not None
-            else {}
-        ),
+        **({"context_snapshot_id": context_snapshot_id} if context_snapshot_id is not None else {}),
         **(persisted.output or {}),
         "tool_calls": [
             {

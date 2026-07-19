@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: HindSight App Runner image service
+
+Parameters:
+  ImageIdentifier:
+    Type: String
+    Description: Immutable ECR image URI, preferably pinned by digest
+  EcrAccessRoleArn:
+    Type: String
+    Description: App Runner access role allowed to pull the private ECR image
+  InstanceRoleArn:
+    Type: String
+    Description: Least-privilege runtime role for declared secrets and selected Bedrock models
+  DatabaseSecretArn:
+    Type: String
+    Description: Secrets Manager ARN containing the runtime DATABASE_URL value
+  McpApiKeySecretArn:
+    Type: String
+    Default: ""
+    Description: Secrets Manager ARN containing COCKROACH_MCP_API_KEY when MCP is enabled
+  DemoResetTokenSecretArn:
+    Type: String
+    Default: ""
+    Description: Optional Secrets Manager ARN containing HINDSIGHT_DEMO_RESET_TOKEN
+  BedrockModelId:
+    Type: String
+    Default: ""
+    Description: Tool-capable model or inference profile used only when BedrockEnabled is true
+  EmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
+  McpClusterId:
+    Type: String
+    Default: ""
+  BedrockEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  VectorEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  McpEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  MaxSize:
+    Type: Number
+    Default: 1
+    MinValue: 1
+
+Conditions:
+  UseMcp: !Equals [!Ref McpEnabled, "true"]
+  UseDemoReset: !Not [!Equals [!Ref DemoResetTokenSecretArn, ""]]
+
+Rules:
+  BedrockConfiguration:
+    RuleCondition: !Equals [!Ref BedrockEnabled, "true"]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref BedrockModelId, ""]]
+        AssertDescription: BedrockModelId is required when BedrockEnabled is true
+  McpConfiguration:
+    RuleCondition: !Equals [!Ref McpEnabled, "true"]
+    Assertions:
+      - Assert: !Equals [!Ref BedrockEnabled, "true"]
+        AssertDescription: MCP requires BedrockEnabled
+      - Assert: !Not [!Equals [!Ref McpClusterId, ""]]
+        AssertDescription: McpClusterId is required when McpEnabled is true
+      - Assert: !Not [!Equals [!Ref McpApiKeySecretArn, ""]]
+        AssertDescription: McpApiKeySecretArn is required when McpEnabled is true
+
+Resources:
+  DemoScaling:
+    Type: AWS::AppRunner::AutoScalingConfiguration
+    Properties:
+      AutoScalingConfigurationName: hindsight-demo
+      MaxConcurrency: 50
+      MinSize: 1
+      MaxSize: !Ref MaxSize
+
+  Service:
+    Type: AWS::AppRunner::Service
+    Properties:
+      ServiceName: hindsight
+      AutoScalingConfigurationArn: !GetAtt DemoScaling.AutoScalingConfigurationArn
+      HealthCheckConfiguration:
+        Protocol: HTTP
+        Path: /health
+        Interval: 10
+        Timeout: 5
+        HealthyThreshold: 1
+        UnhealthyThreshold: 5
+      InstanceConfiguration:
+        Cpu: 1 vCPU
+        Memory: 2 GB
+        InstanceRoleArn: !Ref InstanceRoleArn
+      SourceConfiguration:
+        AuthenticationConfiguration:
+          AccessRoleArn: !Ref EcrAccessRoleArn
+        AutoDeploymentsEnabled: false
+        ImageRepository:
+          ImageIdentifier: !Ref ImageIdentifier
+          ImageRepositoryType: ECR
+          ImageConfiguration:
+            Port: "8000"
+            RuntimeEnvironmentSecrets:
+              - Name: DATABASE_URL
+                Value: !Ref DatabaseSecretArn
+              - !If
+                - UseMcp
+                - Name: COCKROACH_MCP_API_KEY
+                  Value: !Ref McpApiKeySecretArn
+                - !Ref AWS::NoValue
+              - !If
+                - UseDemoReset
+                - Name: HINDSIGHT_DEMO_RESET_TOKEN
+                  Value: !Ref DemoResetTokenSecretArn
+                - !Ref AWS::NoValue
+            RuntimeEnvironmentVariables:
+              - Name: LOG_LEVEL
+                Value: INFO
+              - Name: AWS_REGION
+                Value: !Ref AWS::Region
+              - Name: HINDSIGHT_DEMO_BEDROCK
+                Value: !Ref BedrockEnabled
+              - Name: HINDSIGHT_DEMO_VECTOR
+                Value: !Ref VectorEnabled
+              - Name: HINDSIGHT_DEMO_MCP
+                Value: !Ref McpEnabled
+              - Name: BEDROCK_MODEL_ID
+                Value: !Ref BedrockModelId
+              - Name: BEDROCK_EMBEDDING_MODEL_ID
+                Value: !Ref EmbeddingModelId
+              - Name: COCKROACH_MCP_CLUSTER_ID
+                Value: !Ref McpClusterId
+      Tags:
+        - Key: project
+          Value: hindsight
+
+Outputs:
+  ServiceArn:
+    Value: !GetAtt Service.ServiceArn
+  ServiceUrl:
+    Value: !Sub "https://${Service.ServiceUrl}"

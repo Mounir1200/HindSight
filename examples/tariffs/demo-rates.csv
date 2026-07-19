@@ -1,0 +1,3 @@
+assertion_key,route,service_type,value,currency,unit,valid_from,recorded_at,source
+DE-KE-VOICE-S3,DE->KE,voice,0.30,EUR,minute,2026-01-01T00:00:00Z,2026-01-01T00:00:00Z,s3-demo-v1
+DE-KE-VOICE-S3,DE->KE,voice,0.18,EUR,minute,2026-07-01T00:00:00Z,2026-07-03T00:00:00Z,s3-demo-correction

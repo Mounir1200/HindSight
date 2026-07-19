@@ -67,6 +67,7 @@ class FailingContextReader:
 
 def test_investigation_agent_reads_context_then_persists_advisory_output() -> None:
     case_id, context = _demo_context()
+    correlation_id = UUID("a05e3f80-caa5-452a-bd7f-73d6a1fd8b2f")
     tool_use_id = "tool-use-1"
     client = ScriptedConverseClient(
         [
@@ -113,11 +114,12 @@ def test_investigation_agent_reads_context_then_persists_advisory_output() -> No
         repository,
         clock=SequenceClock(),
         context_reader=context_reader,
-    ).run(case_id=case_id)
+    ).run(case_id=case_id, correlation_id=correlation_id)
 
     run = repository.get(result.run_id)
     calls = repository.tool_calls(result.run_id)
     assert run.status is AgentRunStatus.COMPLETED
+    assert run.correlation_id == correlation_id
     assert run.output == result.output
     assert run.usage == {"inputTokens": 60, "outputTokens": 20, "totalTokens": 80}
     assert run.input_summary["context_reference"] == "snapshot-test"

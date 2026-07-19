@@ -1,0 +1,177 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: HindSight S3 voice CDR ingestion Lambda
+
+Parameters:
+  CdrBucketName:
+    Type: String
+    Description: Globally unique bucket name for synthetic CDR CSV uploads
+  LambdaImageUri:
+    Type: String
+    Description: Immutable ECR image URI built with Dockerfile.lambda
+  DatabaseSecretArn:
+    Type: String
+    Description: Secrets Manager ARN containing the runtime CockroachDB URL
+  MaxIngestionBytes:
+    Type: Number
+    Default: 2000000
+    MinValue: 1
+  MaxCdrRows:
+    Type: Number
+    Default: 10000
+    MinValue: 1
+
+Resources:
+  CdrIngestionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: hindsight-cdr-ingestion
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${CdrBucketName}/cdrs/*"
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseSecretArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt CdrIngestionFailureQueue.Arn
+
+  CdrIngestionFailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: project
+          Value: hindsight
+
+  CdrIngestionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: hindsight-cdr-ingestion
+      PackageType: Image
+      Code:
+        ImageUri: !Ref LambdaImageUri
+      ImageConfig:
+        Command:
+          - hindsight.lambdas.cdr_ingestion.handler
+      Role: !GetAtt CdrIngestionRole.Arn
+      Architectures:
+        - x86_64
+      MemorySize: 512
+      Timeout: 30
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          MAX_INGESTION_BYTES: !Ref MaxIngestionBytes
+          MAX_CDR_ROWS: !Ref MaxCdrRows
+          CDR_TRUST_LEVEL: untrusted
+      Tags:
+        - Key: project
+          Value: hindsight
+
+  CdrIngestionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${CdrIngestionFunction}"
+      RetentionInDays: 14
+
+  CdrIngestionAsyncPolicy:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref CdrIngestionFunction
+      Qualifier: $LATEST
+      MaximumEventAgeInSeconds: 3600
+      MaximumRetryAttempts: 2
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt CdrIngestionFailureQueue.Arn
+
+  AllowCdrBucketInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref CdrIngestionFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:${AWS::Partition}:s3:::${CdrBucketName}"
+
+  CdrBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: AllowCdrBucketInvoke
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref CdrBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt CdrIngestionFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: cdrs/
+                  - Name: suffix
+                    Value: .csv
+      Tags:
+        - Key: project
+          Value: hindsight
+
+  CdrBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CdrBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${CdrBucketName}"
+              - !Sub "arn:${AWS::Partition}:s3:::${CdrBucketName}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+Outputs:
+  CdrBucketName:
+    Value: !Ref CdrBucket
+  CdrIngestionFunctionArn:
+    Value: !GetAtt CdrIngestionFunction.Arn
+  CdrIngestionFailureQueueUrl:
+    Value: !Ref CdrIngestionFailureQueue

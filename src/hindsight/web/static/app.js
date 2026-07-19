@@ -1,14 +1,29 @@
 "use strict";
 
 const runButton = document.querySelector("#run-demo");
+const runButtonLabel = document.querySelector("#run-button-label");
+const runPanel = document.querySelector(".run-panel");
 const runStatus = document.querySelector("#run-status");
 const emptyState = document.querySelector("#empty-state");
 const dashboard = document.querySelector("#dashboard");
 const errorPanel = document.querySelector("#error-panel");
+const errorTitle = document.querySelector("#error-title");
 const errorMessage = document.querySelector("#error-message");
 const platformBadges = document.querySelector("#platform-badges");
 const demoNav = document.querySelector("#demo-nav");
 const technicalNavLink = document.querySelector("#technical-nav-link");
+const incidentCount = document.querySelector("#incident-count");
+const auditCount = document.querySelector("#audit-count");
+const incidentList = document.querySelector("#incident-list");
+const auditList = document.querySelector("#audit-list");
+const caseRegister = document.querySelector("#case-register");
+const workspaceState = document.querySelector("#workspace-state");
+const workspaceStateKicker = document.querySelector("#workspace-state-kicker");
+const workspaceStateTitle = document.querySelector("#workspace-state-title");
+const workspaceStateCopy = document.querySelector("#workspace-state-copy");
+const prepareDemoButton = document.querySelector("#prepare-demo");
+const retryWorkspaceButton = document.querySelector("#retry-workspace");
+let lastWorkspace = null;
 
 const dateFormatter = new Intl.DateTimeFormat("en-GB", {
   dateStyle: "medium",
@@ -29,6 +44,7 @@ const percentageFormatter = new Intl.NumberFormat("en-GB", {
 const labels = {
   applied: "Applied",
   already_remediated: "Already remediated — safe no-op",
+  audit_in_progress: "An audit is already in progress.",
   billing_agent: "Billing agent",
   calculate_call_charge: "Calculate the call charge",
   closed: "Closed",
@@ -43,12 +59,21 @@ const labels = {
   deterministic_temporal_engine: "Deterministic temporal engine",
   distributed_vector_index: "Distributed vector index",
   in_memory: "In-memory",
+  open: "Open report",
+  reported: "Reported",
   read_only: "Read-only",
+  replay: "Replay",
   structured_exact: "Structured exact match",
+  synthetic_replay: "Synthetic replay",
   telecom_adapter: "Telecom adapter",
   temporal_sql: "Temporal SQL",
   wrong_not_knowable: "Wrong, not knowable",
   not_recorded_at_decision: "Not yet recorded when the decision was made",
+  no_reported_incident: "No reported incident is available to audit.",
+  invalid_demo_result: "The audit returned an invalid result.",
+  memory_evaluation: "Memory evaluation case",
+  reported_incident: "Reported incident",
+  synthetic_fixture: "Synthetic fixture",
   advisory_explanation: "Advisory explanation",
 };
 
@@ -149,6 +174,222 @@ function setStatusChip(id, text, tone = "neutral") {
   if (!element) return;
   element.textContent = text || "—";
   element.className = `status-chip status-${tone}`;
+}
+
+function formatDateTime(value) {
+  if (!value) return "\u2014";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : dateFormatter.format(date);
+}
+
+function addRecordDetail(list, label, value) {
+  const item = document.createElement("div");
+  const term = document.createElement("dt");
+  const description = document.createElement("dd");
+  term.textContent = label;
+  description.textContent = value === null || value === undefined || value === "" ? "\u2014" : String(value);
+  item.append(term, description);
+  list.append(item);
+}
+
+function caseRecord(record, kind) {
+  const item = document.createElement("li");
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const primary = document.createElement("span");
+  const subject = document.createElement("strong");
+  const context = document.createElement("span");
+  const impact = document.createElement("span");
+  const impactValue = document.createElement("strong");
+  const state = document.createElement("span");
+  const facts = document.createElement("dl");
+  const currency = record.currency || "EUR";
+
+  item.className = "case-record";
+  primary.className = "case-record-primary";
+  impact.className = "case-record-impact";
+  state.className = "case-record-state";
+  facts.className = "case-record-details";
+  subject.textContent = record.subject_id || record.case_id || "Unidentified case";
+  context.textContent = `${displayLabel(record.service_type)} \u00b7 ${(record.route || "\u2014").replace("->", " \u2192 ")}`;
+
+  if (kind === "incident") {
+    impactValue.textContent = hasNumber(record.amount_at_issue)
+      ? `${formatMoney(record.amount_at_issue, currency)} billed`
+      : "Impact pending";
+    state.textContent = displayLabel(record.status || "reported");
+    addRecordDetail(facts, "Reported", formatDateTime(record.opened_at));
+    addRecordDetail(facts, "Claim", record.claim);
+    addRecordDetail(facts, "Source", displayLabel(record.source));
+    addRecordDetail(facts, "Case ID", record.case_id);
+    addRecordDetail(facts, "Decision link", record.decision_id);
+  } else {
+    impactValue.textContent = formatMoney(record.customer_impact, currency);
+    state.textContent = displayLabel(record.verdict || record.status);
+    addRecordDetail(facts, "Audited", formatDateTime(record.audited_at));
+    addRecordDetail(facts, "Agent fault", formatBoolean(record.agent_fault));
+    addRecordDetail(facts, "Knowledge gap", formatDuration(record.knowledge_gap_seconds));
+    addRecordDetail(facts, "Root cause", displayLabel(record.root_cause));
+    addRecordDetail(facts, "Audit role", displayLabel(record.audit_role));
+    addRecordDetail(facts, "Case ID", record.case_id);
+    addRecordDetail(facts, "Decision ID", record.decision_id);
+  }
+
+  primary.append(subject, context);
+  impact.append(impactValue, state);
+  summary.append(primary, impact);
+  details.append(summary, facts);
+  item.append(details);
+  return item;
+}
+
+function renderCaseRecords(list, records, kind) {
+  const fragment = document.createDocumentFragment();
+  if (records.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "case-record-empty";
+    empty.textContent = kind === "incident"
+      ? "No reported incident is awaiting audit."
+      : "No completed audit is recorded yet.";
+    fragment.append(empty);
+  } else {
+    for (const record of records) fragment.append(caseRecord(record, kind));
+  }
+  list.replaceChildren(fragment);
+}
+
+function normalizeWorkspace(workspace) {
+  const validStates = new Set(["empty", "prepared", "running", "completed"]);
+  if (
+    !workspace
+    || typeof workspace !== "object"
+    || !validStates.has(workspace.demo_state)
+    || typeof workspace.can_run_demo !== "boolean"
+    || typeof workspace.sample_already_audited !== "boolean"
+    || !Array.isArray(workspace.reported_incidents)
+    || !Array.isArray(workspace.past_audits)
+    || workspace.can_run_demo !== (workspace.demo_state === "prepared")
+    || (workspace.can_run_demo && workspace.reported_incidents.length === 0)
+  ) {
+    throw new Error("The case register returned an invalid state.");
+  }
+  return workspace;
+}
+
+function renderListMessage(list, message) {
+  const item = document.createElement("li");
+  item.className = "case-record-empty";
+  item.textContent = message;
+  list.replaceChildren(item);
+}
+
+function showWorkspaceState(kicker, title, copy, action = null) {
+  workspaceStateKicker.textContent = kicker;
+  workspaceStateTitle.textContent = title;
+  workspaceStateCopy.textContent = copy;
+  prepareDemoButton.hidden = action !== "prepare";
+  retryWorkspaceButton.hidden = action !== "retry";
+  workspaceState.hidden = false;
+}
+
+function setWorkspaceLoading() {
+  caseRegister.dataset.state = "loading";
+  caseRegister.setAttribute("aria-busy", "true");
+  runPanel.hidden = true;
+  runButton.disabled = true;
+  emptyState.hidden = true;
+  if (!lastWorkspace) {
+    incidentCount.textContent = "\u2014";
+    auditCount.textContent = "\u2014";
+    renderListMessage(incidentList, "Loading case activity...");
+    renderListMessage(auditList, "Loading audit history...");
+  }
+  showWorkspaceState(
+    "Case source",
+    "Loading the case register.",
+    "Checking for reported incidents and completed audits.",
+  );
+}
+
+function renderWorkspaceUnavailable() {
+  caseRegister.dataset.state = "unavailable";
+  caseRegister.setAttribute("aria-busy", "false");
+  runPanel.hidden = true;
+  runButton.disabled = true;
+  emptyState.hidden = true;
+  if (!lastWorkspace) {
+    incidentCount.textContent = "\u2014";
+    auditCount.textContent = "\u2014";
+    renderListMessage(incidentList, "Case activity unavailable.");
+    renderListMessage(auditList, "Audit history unavailable.");
+  }
+  showWorkspaceState(
+    "Source unavailable",
+    "The case register could not be reached.",
+    lastWorkspace
+      ? "The last known register remains visible. Audit actions stay disabled until the source responds."
+      : "HindSight cannot verify whether an incident exists, so no audit action is available.",
+    "retry",
+  );
+}
+
+function renderWorkspace(workspace) {
+  const normalized = normalizeWorkspace(workspace);
+  const incidents = normalized.reported_incidents;
+  const audits = normalized.past_audits;
+  const isReplay = normalized.sample_already_audited;
+  lastWorkspace = normalized;
+  caseRegister.dataset.state = normalized.demo_state;
+  caseRegister.setAttribute("aria-busy", "false");
+  incidentCount.textContent = String(incidents.length);
+  auditCount.textContent = String(audits.length);
+  renderCaseRecords(incidentList, incidents, "incident");
+  renderCaseRecords(auditList, audits, "audit");
+
+  if (normalized.demo_state === "running") {
+    runPanel.hidden = false;
+    runButton.disabled = true;
+    runButton.setAttribute("aria-busy", "true");
+    runButtonLabel.textContent = "Audit in progress";
+    runStatus.textContent = "Reconstructing the reported decision.";
+    workspaceState.hidden = true;
+    return;
+  }
+
+  runButton.removeAttribute("aria-busy");
+  runButton.disabled = !normalized.can_run_demo;
+  runButtonLabel.textContent = isReplay ? "Replay the audit" : "Run the audit";
+  runPanel.hidden = !normalized.can_run_demo;
+  if (normalized.can_run_demo) {
+    runStatus.textContent = isReplay
+      ? "The fixed sample is ready to replay. Existing audit history will not be duplicated."
+      : `${incidents.length} reported incident${incidents.length === 1 ? " is" : "s are"} ready for audit.`;
+    workspaceState.hidden = true;
+    if (dashboard.hidden) emptyState.hidden = false;
+    return;
+  }
+
+  emptyState.hidden = true;
+  prepareDemoButton.textContent = isReplay ? "Replay sample scenario" : "Load sample incident";
+  showWorkspaceState(
+    audits.length > 0 ? "Queue clear" : "Case register clear",
+    "No incident is waiting for audit.",
+    isReplay
+      ? "This fixed sample already exists in audit history. Replay it to verify the workflow without claiming a new production incident."
+      : audits.length > 0
+      ? "Completed reconstructions remain available below. Load the synthetic case to run another explicit audit."
+      : "HindSight only exposes the audit action when a report exists. Load the synthetic hackathon case to test the workflow.",
+    "prepare",
+  );
+}
+
+async function loadWorkspace() {
+  setWorkspaceLoading();
+  try {
+    renderWorkspace(await requestJson("/demo/workspace", {}, 10_000));
+  } catch {
+    renderWorkspaceUnavailable();
+  }
 }
 
 function renderPlatformBadges(payload) {
@@ -490,6 +731,11 @@ function renderDashboard(payload) {
   renderPlatformBadges(payload);
   renderCaseOne(payload);
   renderLearning(payload);
+  setText("selected-audit-subject", valueAt(payload, "decision.subject_id"));
+  setText(
+    "selected-audit-state",
+    `${displayLabel(valueAt(payload, "verdict.category"))} \u00b7 ${formatMoney(valueAt(payload, "comparison.overcharge"), valueAt(payload, "comparison.currency", "EUR"))} customer impact`,
+  );
   emptyState.hidden = true;
   dashboard.hidden = false;
   if (demoNav) demoNav.hidden = false;
@@ -500,10 +746,27 @@ async function parseError(response) {
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
     const body = await response.json();
-    return body.error || body.detail || `HTTP error ${response.status}`;
+    const detail = body.error || body.detail;
+    return detail ? displayLabel(detail) : `HTTP error ${response.status}`;
   }
   const body = await response.text();
   return body.trim() || `HTTP error ${response.status}`;
+}
+
+async function requestJson(path, options = {}, timeout = 10_000) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await fetch(path, {
+      ...options,
+      headers: { Accept: "application/json", ...options.headers },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(await parseError(response));
+    return await response.json();
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 function preferredScrollBehavior() {
@@ -511,27 +774,23 @@ function preferredScrollBehavior() {
 }
 
 async function runDemo() {
+  if (!lastWorkspace?.can_run_demo) return;
+  const isReplay = lastWorkspace.sample_already_audited;
   runButton.disabled = true;
   runButton.setAttribute("aria-busy", "true");
-  runStatus.textContent = "Replaying the decision…";
+  runButtonLabel.textContent = isReplay ? "Replaying audit" : "Auditing decision";
+  runStatus.textContent = isReplay
+    ? "Reconstructing the fixed sample decision again..."
+    : "Reconstructing the reported decision...";
   errorPanel.hidden = true;
 
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), 45_000);
   try {
-    const response = await fetch("/demo/seed", {
-      method: "POST",
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(await parseError(response));
-    const payload = await response.json();
+    const payload = await requestJson("/demo/seed", { method: "POST" }, 45_000);
     if (!payload || typeof payload !== "object" || !payload.decision || !payload.verdict) {
       throw new Error("The response does not contain the expected demo payload.");
     }
+    renderWorkspace(payload.workspace);
     renderDashboard(payload);
-    runStatus.textContent = "Audit complete — decision reconstructed.";
-    runButton.textContent = "Run again";
     document.getElementById("case-one-title")?.focus({ preventScroll: true });
     document.getElementById("outcome")?.scrollIntoView({
       behavior: preferredScrollBehavior(),
@@ -543,15 +802,55 @@ async function runDemo() {
       : error instanceof Error
         ? error.message
         : "Unknown error.";
+    errorTitle.textContent = "The audit could not run.";
     errorMessage.textContent = message;
     errorPanel.hidden = false;
-    runStatus.textContent = "The audit failed.";
+    await loadWorkspace();
+    errorPanel.focus({ preventScroll: true });
     errorPanel.scrollIntoView({ behavior: preferredScrollBehavior(), block: "center" });
   } finally {
-    window.clearTimeout(timeoutId);
-    runButton.disabled = false;
     runButton.removeAttribute("aria-busy");
   }
 }
 
+async function prepareDemo() {
+  const isReplay = lastWorkspace?.sample_already_audited === true;
+  prepareDemoButton.disabled = true;
+  caseRegister.setAttribute("aria-busy", "true");
+  showWorkspaceState(
+    isReplay ? "Replay intake" : "Synthetic intake",
+    isReplay ? "Preparing the sample replay." : "Loading the sample incident.",
+    isReplay
+      ? "This reopens only the fixed sample scenario. It does not create a new production incident."
+      : "This creates one explicit test report. It does not run the audit.",
+  );
+  errorPanel.hidden = true;
+  try {
+    renderWorkspace(await requestJson("/demo/prepare", { method: "POST" }, 10_000));
+    document.getElementById("empty-title")?.focus({ preventScroll: true });
+  } catch (error) {
+    errorTitle.textContent = isReplay
+      ? "The sample scenario could not be prepared for replay."
+      : "The sample incident could not load.";
+    errorMessage.textContent = error instanceof DOMException && error.name === "AbortError"
+      ? "The server did not respond within 10 seconds."
+      : error instanceof Error
+        ? error.message
+        : "Unknown error.";
+    errorPanel.hidden = false;
+    await loadWorkspace();
+    errorPanel.focus({ preventScroll: true });
+  } finally {
+    prepareDemoButton.disabled = false;
+  }
+}
+
+function retryWorkspace() {
+  errorPanel.hidden = true;
+  void loadWorkspace();
+}
+
 runButton.addEventListener("click", runDemo);
+prepareDemoButton.addEventListener("click", prepareDemo);
+retryWorkspaceButton.addEventListener("click", retryWorkspace);
+void loadWorkspace();

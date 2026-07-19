@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: HindSight S3 tariff ingestion Lambda
+
+Parameters:
+  TariffBucketName:
+    Type: String
+    Description: Globally unique bucket name for tariff CSV uploads
+  LambdaImageUri:
+    Type: String
+    Description: Immutable ECR image URI built with Dockerfile.lambda
+  DatabaseSecretArn:
+    Type: String
+    Description: Secrets Manager ARN containing the runtime CockroachDB URL
+  MaxIngestionBytes:
+    Type: Number
+    Default: 2000000
+    MinValue: 1
+  MaxTariffRows:
+    Type: Number
+    Default: 10000
+    MinValue: 1
+
+Resources:
+  TariffIngestionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: hindsight-tariff-ingestion
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${TariffBucketName}/tariffs/*"
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseSecretArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt TariffIngestionFailureQueue.Arn
+
+  TariffIngestionFailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: project
+          Value: hindsight
+
+  TariffIngestionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: hindsight-tariff-ingestion
+      PackageType: Image
+      Code:
+        ImageUri: !Ref LambdaImageUri
+      Role: !GetAtt TariffIngestionRole.Arn
+      Architectures:
+        - x86_64
+      MemorySize: 512
+      Timeout: 30
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          MAX_INGESTION_BYTES: !Ref MaxIngestionBytes
+          MAX_TARIFF_ROWS: !Ref MaxTariffRows
+          TARIFF_TRUST_LEVEL: untrusted
+      Tags:
+        - Key: project
+          Value: hindsight
+
+  TariffIngestionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${TariffIngestionFunction}"
+      RetentionInDays: 14
+
+  TariffIngestionAsyncPolicy:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref TariffIngestionFunction
+      Qualifier: $LATEST
+      MaximumEventAgeInSeconds: 3600
+      MaximumRetryAttempts: 2
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt TariffIngestionFailureQueue.Arn
+
+  AllowTariffBucketInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TariffIngestionFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:${AWS::Partition}:s3:::${TariffBucketName}"
+
+  TariffBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: AllowTariffBucketInvoke
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref TariffBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt TariffIngestionFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: tariffs/
+                  - Name: suffix
+                    Value: .csv
+      Tags:
+        - Key: project
+          Value: hindsight
+
+  TariffBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TariffBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${TariffBucketName}"
+              - !Sub "arn:${AWS::Partition}:s3:::${TariffBucketName}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+Outputs:
+  TariffBucketName:
+    Value: !Ref TariffBucket
+  TariffIngestionFunctionArn:
+    Value: !GetAtt TariffIngestionFunction.Arn
+  TariffIngestionFailureQueueUrl:
+    Value: !Ref TariffIngestionFailureQueue

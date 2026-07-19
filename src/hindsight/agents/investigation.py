@@ -150,6 +150,7 @@ class InvestigationAgent:
         *,
         case_id: UUID,
         context: Mapping[str, object] | None = None,
+        correlation_id: UUID | None = None,
     ) -> InvestigationResult:
         if self._context_reader is None:
             if context is None:
@@ -160,7 +161,7 @@ class InvestigationAgent:
                 raise ValueError("context cannot be supplied with a context reader")
             context_reader = self._context_reader
         run_id = self._id_factory()
-        correlation_id = self._id_factory()
+        correlation_id = correlation_id or self._id_factory()
         started_at = self._clock()
         input_summary = {
             "case_id": str(case_id),

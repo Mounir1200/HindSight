@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -93,11 +94,28 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         import uvicorn
 
+        log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+        if log_level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            log_level = "INFO"
+        log_config = deepcopy(uvicorn.config.LOGGING_CONFIG)
+        log_config["formatters"]["hindsight"] = {"format": "%(message)s"}
+        log_config["handlers"]["hindsight"] = {
+            "class": "logging.StreamHandler",
+            "formatter": "hindsight",
+            "stream": "ext://sys.stdout",
+        }
+        log_config["loggers"]["hindsight.web"] = {
+            "handlers": ["hindsight"],
+            "level": log_level,
+            "propagate": False,
+        }
         uvicorn.run(
             "hindsight.web.app:create_app",
             factory=True,
             host=args.host,
             port=args.port,
+            access_log=False,
+            log_config=log_config,
         )
         return 0
 

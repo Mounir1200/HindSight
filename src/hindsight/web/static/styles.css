@@ -282,6 +282,356 @@ time,
   color: var(--danger-soft);
 }
 
+.case-register {
+  display: grid;
+  grid-template-columns: minmax(15rem, 0.58fr) minmax(0, 1.42fr);
+  margin-top: 1.25rem;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.case-register-heading {
+  display: grid;
+  align-content: space-between;
+  gap: 1.2rem;
+  padding: 1.15rem 1.25rem;
+  border-right: 1px solid var(--line);
+}
+
+.case-register-heading h2,
+.case-rail h3 {
+  margin: 0;
+  font-family: Bahnschrift, "Arial Narrow", "Segoe UI", sans-serif;
+}
+
+.case-register-heading h2 {
+  max-width: 12ch;
+  font-size: clamp(1.65rem, 2.3vw, 2.45rem);
+  letter-spacing: -0.05em;
+  line-height: 0.95;
+}
+
+.case-register-heading > div > p:last-child {
+  max-width: 34rem;
+  margin: 0.65rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.case-register-counts {
+  display: flex;
+  margin: 0;
+  gap: 1.5rem;
+}
+
+.case-register-counts div {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: baseline;
+  gap: 0.45rem;
+}
+
+.case-register-counts dt {
+  color: var(--muted);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+}
+
+.case-register-counts dd {
+  margin: 0;
+  color: var(--ink);
+  font-family: Bahnschrift, "Arial Narrow", sans-serif;
+  font-size: 1.6rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.case-register-rails {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.case-rail {
+  min-width: 0;
+}
+
+.case-rail + .case-rail {
+  border-left: 1px solid var(--line);
+}
+
+.case-rail > header {
+  display: flex;
+  min-height: 3.25rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.case-rail > header > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.case-rail > header > span {
+  color: var(--muted);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.62rem;
+  text-align: right;
+  text-transform: uppercase;
+}
+
+.case-rail h3 {
+  font-size: 1rem;
+  letter-spacing: -0.02em;
+}
+
+.case-rail-key {
+  width: 2rem;
+  border-top: 3px solid var(--truth);
+}
+
+.incident-rail .case-rail-key {
+  border-top-color: var(--knowledge);
+  border-top-style: dashed;
+}
+
+.case-record-list {
+  max-height: 17rem;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: thin;
+}
+
+.case-record + .case-record,
+.case-record-empty + .case-record {
+  border-top: 1px solid var(--line-soft);
+}
+
+.case-record details {
+  position: relative;
+}
+
+.case-record summary {
+  display: grid;
+  min-height: 6.4rem;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.9rem 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.case-record summary::-webkit-details-marker {
+  display: none;
+}
+
+.case-record summary::after {
+  color: var(--muted);
+  content: "+";
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 1.15rem;
+}
+
+.case-record details[open] summary::after {
+  content: "\2212";
+}
+
+.case-record summary:hover {
+  background: var(--surface-strong);
+}
+
+.case-record-primary {
+  display: grid;
+  min-width: 0;
+  gap: 0.25rem;
+}
+
+.case-record-primary strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.88rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.case-record-primary span,
+.case-record-impact span {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.case-record-impact {
+  display: grid;
+  justify-items: end;
+  gap: 0.1rem;
+  text-align: right;
+}
+
+.case-record-impact strong {
+  color: var(--ink);
+  font-family: Bahnschrift, "Arial Narrow", sans-serif;
+  font-size: 1.05rem;
+}
+
+.case-record-state {
+  color: var(--truth-soft);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.case-record-impact .case-record-state {
+  color: var(--truth-soft);
+}
+
+.incident-rail .case-record-impact .case-record-state {
+  color: var(--knowledge-soft);
+}
+
+.case-record-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem 1rem;
+  padding: 0.9rem 1rem 1rem;
+  border-top: 1px solid var(--line-soft);
+  background: var(--canvas);
+}
+
+.case-record-details div {
+  min-width: 0;
+}
+
+.case-record-details dt {
+  color: var(--muted);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+}
+
+.case-record-details dd {
+  margin: 0.18rem 0 0;
+  color: var(--ink);
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+.case-record-empty {
+  display: grid;
+  min-height: 6.4rem;
+  padding: 1rem;
+  align-content: center;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.selected-audit-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin: 0 0 1.5rem;
+  padding: 0.75rem 1rem;
+  border-left: 4px solid var(--brand-coral);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.selected-audit-bar > span:first-child {
+  color: var(--danger-readable);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.67rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.selected-audit-bar strong {
+  color: var(--ink);
+}
+
+.workspace-state {
+  position: relative;
+  display: grid;
+  min-height: 11rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2rem;
+  padding: clamp(2rem, 4vw, 3.5rem) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.workspace-state::before {
+  position: absolute;
+  top: clamp(2.2rem, 4vw, 3.25rem);
+  left: 0.15rem;
+  width: 0.45rem;
+  height: 3rem;
+  background: var(--brand-coral);
+  content: "";
+  transform: skewY(-38deg);
+}
+
+.workspace-state > div:first-child {
+  padding-left: 1.5rem;
+}
+
+.workspace-state h2 {
+  max-width: 20ch;
+  margin: 0;
+  font-family: Bahnschrift, "Arial Narrow", "Segoe UI", sans-serif;
+  font-size: clamp(1.8rem, 3vw, 3rem);
+  letter-spacing: -0.045em;
+  line-height: 0.98;
+}
+
+.workspace-state > div:first-child > p:last-child {
+  max-width: 42rem;
+  margin: 0.75rem 0 0;
+  color: var(--muted);
+}
+
+.workspace-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.secondary-button {
+  min-height: 3rem;
+  padding: 0.7rem 1.2rem;
+  border: 1px solid var(--brand-coral);
+  background: transparent;
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
+  color: var(--ink);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.secondary-button:hover:not(:disabled) {
+  background: var(--brand-coral);
+  color: var(--on-decision);
+}
+
+.secondary-button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.case-register ~ .empty-state {
+  min-height: auto;
+  align-content: start;
+  padding-top: clamp(2rem, 4vw, 4rem);
+}
+
 .empty-state {
   display: grid;
   min-height: calc(100svh - var(--header-height));
@@ -1611,6 +1961,21 @@ th {
     max-width: none;
   }
 
+  .case-register {
+    grid-template-columns: 1fr;
+  }
+
+  .case-register-heading {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .case-register-heading h2 {
+    max-width: 18ch;
+  }
+
   .empty-intro {
     grid-template-columns: 1fr;
     gap: 1.5rem;
@@ -1685,6 +2050,40 @@ th {
 
   .run-panel {
     justify-items: stretch;
+  }
+
+  .case-register-heading,
+  .case-register-rails {
+    grid-template-columns: 1fr;
+  }
+
+  .case-register-heading {
+    align-items: start;
+  }
+
+  .case-rail + .case-rail {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .case-record-list {
+    max-height: none;
+  }
+
+  .selected-audit-bar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .workspace-state {
+    grid-template-columns: 1fr;
+    align-items: start;
+    gap: 1.25rem;
+  }
+
+  .workspace-actions {
+    justify-content: flex-start;
+    padding-left: 1.5rem;
   }
 
   .primary-button {
@@ -2050,6 +2449,68 @@ th {
   .header-shell,
   .site-footer {
     width: min(calc(100% - 1rem), var(--page-width));
+  }
+
+  .case-register {
+    margin-top: 0.75rem;
+  }
+
+  .case-register-heading,
+  .case-rail > header,
+  .case-record summary,
+  .case-record-details {
+    padding-right: 0.85rem;
+    padding-left: 0.85rem;
+  }
+
+  .case-register-counts {
+    width: 100%;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .workspace-actions,
+  .secondary-button {
+    width: 100%;
+  }
+
+  .workspace-actions {
+    padding-right: 1.5rem;
+  }
+
+  .case-register-counts div {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+  }
+
+  .case-rail > header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .case-rail > header > span {
+    text-align: left;
+  }
+
+  .case-record summary {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .case-record-impact {
+    grid-column: 1;
+    grid-row: 2;
+    justify-items: start;
+    text-align: left;
+  }
+
+  .case-record summary::after {
+    grid-column: 2;
+    grid-row: 1 / 3;
+  }
+
+  .case-record-details {
+    grid-template-columns: 1fr;
   }
 
   .empty-intro h2 {
