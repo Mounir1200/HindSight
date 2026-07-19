@@ -17,7 +17,7 @@ from hindsight.core.agents.repository import AgentRunRepository
 
 TOOL_NAME = "get_investigation_context"
 PROMPT_VERSION = "investigation-v3"
-TOOLSET_VERSION = "telecom-readonly-v2"
+TOOLSET_VERSION = "telecom-readonly-v3-mcp"
 MAX_MODEL_TURNS = 3
 MAX_TOOL_CALLS = 1
 MAX_TOOL_RESULT_BYTES = 64_000
@@ -99,6 +99,22 @@ class ConverseClient(Protocol):
     ) -> ConverseResponse: ...
 
 
+class InvestigationContextReader(Protocol):
+    @property
+    def source(self) -> str: ...
+
+    def read(self, case_id: UUID) -> Mapping[str, object]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _StaticContextReader:
+    context: Mapping[str, object]
+    source: str = "local_deterministic_context"
+
+    def read(self, case_id: UUID) -> Mapping[str, object]:
+        return self.context
+
+
 @dataclass(frozen=True, slots=True)
 class InvestigationResult:
     run_id: UUID
@@ -121,22 +137,39 @@ class InvestigationAgent:
         *,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], UUID] | None = None,
+        context_reader: InvestigationContextReader | None = None,
     ) -> None:
         self._client = client
         self._repository = repository
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory or uuid4
+        self._context_reader = context_reader
 
     def run(
         self,
         *,
         case_id: UUID,
-        context: Mapping[str, object],
+        context: Mapping[str, object] | None = None,
     ) -> InvestigationResult:
-        safe_context = _prepare_context(case_id, context)
+        if self._context_reader is None:
+            if context is None:
+                raise ValueError("an investigation context or context reader is required")
+            context_reader: InvestigationContextReader = _StaticContextReader(context)
+        else:
+            if context is not None:
+                raise ValueError("context cannot be supplied with a context reader")
+            context_reader = self._context_reader
         run_id = self._id_factory()
         correlation_id = self._id_factory()
         started_at = self._clock()
+        input_summary = {
+            "case_id": str(case_id),
+            "allowed_tool": TOOL_NAME,
+            "context_source": context_reader.source,
+        }
+        context_reference = getattr(context_reader, "reference", None)
+        if isinstance(context_reference, str) and context_reference:
+            input_summary["context_reference"] = context_reference
         self._repository.start_run(
             AgentRunRecord(
                 id=run_id,
@@ -154,7 +187,7 @@ class InvestigationAgent:
                 started_at=started_at,
                 updated_at=started_at,
                 completed_at=None,
-                input_summary={"case_id": str(case_id), "allowed_tool": TOOL_NAME},
+                input_summary=input_summary,
             )
         )
 
@@ -164,7 +197,7 @@ class InvestigationAgent:
                 run_id,
                 correlation_id,
                 case_id,
-                safe_context,
+                context_reader,
                 accounting,
             )
             completed_at = self._clock()
@@ -204,7 +237,7 @@ class InvestigationAgent:
         run_id: UUID,
         correlation_id: UUID,
         case_id: UUID,
-        context: dict[str, Any],
+        context_reader: InvestigationContextReader,
         accounting: _ConversationAccounting,
     ) -> tuple[dict[str, Any], dict[str, int]]:
         messages: list[dict[str, Any]] = [
@@ -260,7 +293,7 @@ class InvestigationAgent:
                             run_id,
                             tool_call_count,
                             case_id,
-                            context,
+                            context_reader,
                             request,
                         )
                     )
@@ -291,6 +324,7 @@ class InvestigationAgent:
                     "verdict_source": "deterministic_temporal_engine",
                     "financial_source": "telecom_adapter",
                     "model_output_role": "advisory_explanation",
+                    "context_transport": context_reader.source,
                 },
             }
             return output, accounting.usage
@@ -305,7 +339,7 @@ class InvestigationAgent:
         run_id: UUID,
         sequence_number: int,
         case_id: UUID,
-        context: dict[str, Any],
+        context_reader: InvestigationContextReader,
         request: dict[str, Any],
     ) -> dict[str, Any]:
         tool_use_id = request.get("toolUseId")
@@ -320,8 +354,22 @@ class InvestigationAgent:
 
         requested_at = self._clock()
         try:
-            result = _get_investigation_context(name, arguments, case_id, context)
-        except AgentProtocolError as error:
+            _validate_context_request(name, arguments, case_id)
+            try:
+                result = prepare_investigation_context(
+                    case_id,
+                    context_reader.read(case_id),
+                )
+            except InvestigationContextReadError:
+                raise
+            except (TypeError, ValueError) as error:
+                raise InvestigationContextReadError(
+                    "invalid_context_result",
+                    "the investigation context source returned invalid data",
+                    retryable=False,
+                ) from error
+        except Exception as error:
+            failure = _tool_failure(error)
             self._repository.record_tool_call(
                 ToolCallRecord(
                     id=uuid5(run_id, tool_use_id),
@@ -333,10 +381,16 @@ class InvestigationAgent:
                     requested_at=requested_at,
                     completed_at=self._clock(),
                     arguments=_safe_arguments(arguments),
-                    error={"code": error.code, "retryable": False},
+                    error=failure,
                 )
             )
-            raise
+            if isinstance(error, InvestigationAgentError):
+                raise
+            raise InvestigationContextReadError(
+                "context_read_failed",
+                "the investigation context source failed",
+                retryable=True,
+            ) from error
 
         self._repository.record_tool_call(
             ToolCallRecord(
@@ -360,7 +414,7 @@ class InvestigationAgent:
         }
 
 
-def _prepare_context(
+def prepare_investigation_context(
     case_id: UUID,
     context: Mapping[str, object],
 ) -> dict[str, Any]:
@@ -375,12 +429,11 @@ def _prepare_context(
     return normalized
 
 
-def _get_investigation_context(
+def _validate_context_request(
     name: str,
     arguments: dict[str, Any],
     case_id: UUID,
-    context: dict[str, Any],
-) -> dict[str, Any]:
+) -> None:
     if name != TOOL_NAME:
         raise AgentProtocolError("unknown_tool", "the requested tool is not allowlisted")
     if set(arguments) != {"case_id"}:
@@ -400,7 +453,6 @@ def _get_investigation_context(
             "cross_case_access_denied",
             "the tool cannot access a different dispute",
         )
-    return context
 
 
 def _assistant_message(message: object) -> dict[str, Any]:
@@ -478,6 +530,12 @@ def _failure_payload(
             "category": "protocol_or_policy",
             "retryable": False,
         }
+    elif isinstance(error, InvestigationContextReadError):
+        failure = {
+            "code": error.code,
+            "category": "context_transport",
+            "retryable": error.retryable,
+        }
     else:
         failure = {
             "code": "agent_execution_failed",
@@ -492,6 +550,14 @@ def _failure_payload(
     }
 
 
+def _tool_failure(error: Exception) -> dict[str, Any]:
+    if isinstance(error, AgentProtocolError):
+        return {"code": error.code, "retryable": False}
+    if isinstance(error, InvestigationContextReadError):
+        return {"code": error.code, "retryable": error.retryable}
+    return {"code": "context_read_failed", "retryable": True}
+
+
 class InvestigationAgentError(RuntimeError):
     def __init__(self, message: str, *, run_id: UUID | None = None) -> None:
         super().__init__(message)
@@ -502,3 +568,10 @@ class AgentProtocolError(InvestigationAgentError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class InvestigationContextReadError(InvestigationAgentError):
+    def __init__(self, code: str, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable

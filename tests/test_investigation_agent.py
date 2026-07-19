@@ -6,7 +6,11 @@ from uuid import UUID
 import pytest
 
 from hindsight.adapters.telecom.remediation import InMemoryTelecomRemediationRepository
-from hindsight.agents.investigation import AgentProtocolError, InvestigationAgent
+from hindsight.agents.investigation import (
+    AgentProtocolError,
+    InvestigationAgent,
+    InvestigationContextReadError,
+)
 from hindsight.core.agents.models import AgentRunStatus, ToolCallStatus
 from hindsight.core.agents.repository import InMemoryAgentRunRepository
 from hindsight.core.assertions.repository import InMemoryAssertionRepository
@@ -35,6 +39,30 @@ class SequenceClock:
         value = self._value
         self._value += timedelta(milliseconds=1)
         return value
+
+
+class RecordingContextReader:
+    source = "cockroachdb_managed_mcp"
+    reference = "snapshot-test"
+
+    def __init__(self, context: dict[str, object]) -> None:
+        self._context = context
+        self.calls: list[UUID] = []
+
+    def read(self, case_id: UUID) -> dict[str, object]:
+        self.calls.append(case_id)
+        return self._context
+
+
+class FailingContextReader:
+    source = "cockroachdb_managed_mcp"
+
+    def read(self, case_id: UUID) -> dict[str, object]:
+        raise InvestigationContextReadError(
+            "managed_mcp_request_failed",
+            "Managed MCP request failed",
+            retryable=True,
+        )
 
 
 def test_investigation_agent_reads_context_then_persists_advisory_output() -> None:
@@ -78,19 +106,24 @@ def test_investigation_agent_reads_context_then_persists_advisory_output() -> No
         ]
     )
     repository = InMemoryAgentRunRepository()
+    context_reader = RecordingContextReader(context)
 
     result = InvestigationAgent(
         client,
         repository,
         clock=SequenceClock(),
-    ).run(case_id=case_id, context=context)
+        context_reader=context_reader,
+    ).run(case_id=case_id)
 
     run = repository.get(result.run_id)
     calls = repository.tool_calls(result.run_id)
     assert run.status is AgentRunStatus.COMPLETED
     assert run.output == result.output
     assert run.usage == {"inputTokens": 60, "outputTokens": 20, "totalTokens": 80}
+    assert run.input_summary["context_reference"] == "snapshot-test"
     assert result.output["safety"]["mutations_performed"] == 0
+    assert result.output["safety"]["context_transport"] == "cockroachdb_managed_mcp"
+    assert context_reader.calls == [case_id]
     assert len(calls) == 1
     assert calls[0].status is ToolCallStatus.SUCCEEDED
     assert calls[0].result["case_id"] == str(case_id)
@@ -192,6 +225,53 @@ def test_investigation_agent_journals_truncated_provider_output() -> None:
         "model_turns": 1,
         "provider_stop_reason": "max_tokens",
     }
+
+
+def test_investigation_agent_journals_managed_mcp_failure() -> None:
+    case_id, _ = _demo_context()
+    client = ScriptedConverseClient(
+        [
+            ConverseResponse(
+                message={
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "toolUse": {
+                                "toolUseId": "mcp-read-1",
+                                "name": "get_investigation_context",
+                                "input": {"case_id": str(case_id)},
+                            }
+                        }
+                    ],
+                },
+                stop_reason="tool_use",
+                usage={"inputTokens": 20, "outputTokens": 5, "totalTokens": 25},
+                request_id="request-mcp",
+            )
+        ]
+    )
+    repository = InMemoryAgentRunRepository()
+    run_id = UUID("00000000-0000-0000-0000-000000000005")
+    ids = iter((run_id, UUID("00000000-0000-0000-0000-000000000006")))
+
+    with pytest.raises(InvestigationContextReadError):
+        InvestigationAgent(
+            client,
+            repository,
+            clock=SequenceClock(),
+            id_factory=lambda: next(ids),
+            context_reader=FailingContextReader(),
+        ).run(case_id=case_id)
+
+    run = repository.get(run_id)
+    calls = repository.tool_calls(run_id)
+    assert run.status is AgentRunStatus.FAILED
+    assert run.error["code"] == "managed_mcp_request_failed"
+    assert run.error["category"] == "context_transport"
+    assert len(calls) == 1
+    assert calls[0].status is ToolCallStatus.FAILED
+    assert calls[0].error == {"code": "managed_mcp_request_failed", "retryable": True}
+    assert len(client.requests) == 1
 
 
 def _demo_context() -> tuple[UUID, dict[str, object]]:

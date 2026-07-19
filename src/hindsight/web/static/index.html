@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'"
+    >
+    <meta
+      name="description"
+      content="HindSight judges AI decisions against what was true and what was knowable when they were made."
+    >
+    <title>HindSight — Judge the decision. Not the hindsight.</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+    <meta name="theme-color" content="#082E2B">
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+
+    <header class="site-header">
+      <div class="header-shell">
+        <div class="brand-block">
+          <img class="brand-mark" src="/assets/brand-mark.svg" alt="">
+          <div class="brand-copy">
+            <p class="brand-promise">Judge the decision. Not the hindsight.</p>
+            <h1 aria-label="HindSight"><span class="wordmark-hind">Hind</span><span class="wordmark-cut" aria-hidden="true"></span><span class="wordmark-sight">Sight</span></h1>
+            <p class="domain-label">CockroachDB × AWS · Telecom revenue assurance</p>
+          </div>
+        </div>
+
+        <div class="run-panel">
+          <button id="run-demo" class="primary-button" type="button">
+            <span aria-hidden="true">▶</span>
+            Run the audit
+          </button>
+          <p id="run-status" class="run-status" role="status" aria-live="polite">
+            Ready to reconstruct the decision.
+          </p>
+        </div>
+      </div>
+    </header>
+
+    <nav id="demo-nav" class="demo-nav" aria-label="Audit sections" hidden>
+      <div class="demo-nav-inner">
+        <a href="#outcome"><span aria-hidden="true">01</span> Outcome</a>
+        <a href="#timeline-proof"><span aria-hidden="true">02</span> Timeline</a>
+        <a href="#evidence"><span aria-hidden="true">03</span> Evidence</a>
+        <a href="#safe-fix"><span aria-hidden="true">04</span> Safe fix</a>
+        <a href="#learning"><span aria-hidden="true">05</span> Learning</a>
+        <a id="technical-nav-link" href="#technical-proof" hidden>
+          <span aria-hidden="true">06</span> Technical proof
+        </a>
+      </div>
+    </nav>
+
+    <main id="main-content" class="page-shell" tabindex="-1">
+      <section id="error-panel" class="notice notice-error" role="alert" hidden>
+        <strong>The audit could not run.</strong>
+        <span id="error-message"></span>
+      </section>
+
+      <section id="empty-state" class="empty-state" aria-labelledby="empty-title">
+        <div class="empty-intro">
+          <p class="section-kicker">Sample case · RA–2026–07</p>
+          <h2 id="empty-title">Was the agent wrong—or was the truth late?</h2>
+          <p>
+            HindSight reconstructs the moment of decision: what was true, what the agent could
+            know, and what only became clear later. Run one case from incorrect invoice to safe
+            remediation and reusable memory.
+          </p>
+        </div>
+
+        <figure class="register-preview" aria-labelledby="preview-title">
+          <figcaption id="preview-title">
+            <span>One event, two timelines</span>
+            <strong>Voice tariff · FR → SN</strong>
+          </figcaption>
+          <div class="switchboard-frame">
+            <svg
+              class="switchboard-svg"
+              viewBox="0 0 1200 430"
+              role="img"
+              aria-labelledby="switchboard-title switchboard-description"
+            >
+              <title id="switchboard-title">A 48-hour gap between business truth and agent knowledge</title>
+              <desc id="switchboard-description">
+                The correct 0.15 euro rate took effect on July 1. The agent could still only
+                query the old 0.25 euro rate when it billed the call on July 2. The correction
+                became queryable on July 3, when both timelines rejoined.
+              </desc>
+              <defs>
+                <pattern id="gap-hatch" width="16" height="16" patternUnits="userSpaceOnUse">
+                  <path d="M-4 4 L4 -4 M0 16 L16 0 M12 20 L20 12" class="gap-hatch-line"></path>
+                </pattern>
+              </defs>
+              <g class="switchboard-grid" aria-hidden="true">
+                <path d="M170 72 H1080"></path>
+                <path d="M170 360 H1080"></path>
+                <path d="M250 54 V376 M640 54 V376 M1040 54 V376"></path>
+              </g>
+              <path
+                class="gap-field"
+                d="M250 156 H1040 V298 H250 L210 227 Z"
+                fill="url(#gap-hatch)"
+              ></path>
+              <path class="gap-outline" d="M250 156 H1040 V298 H250 L210 227 Z"></path>
+              <path class="decision-zone" d="M610 80 H670 V338 H610 Z"></path>
+              <path class="truth-signal" d="M150 156 H1040"></path>
+              <path class="knowledge-signal" d="M150 298 H1040 V156"></path>
+              <path class="decision-cut" d="M640 80 V338"></path>
+              <g class="switchboard-node truth-node">
+                <circle cx="250" cy="156" r="10"></circle>
+                <circle cx="640" cy="156" r="10"></circle>
+                <circle cx="1040" cy="156" r="10"></circle>
+              </g>
+              <g class="switchboard-node knowledge-node">
+                <rect x="240" y="288" width="20" height="20"></rect>
+                <rect x="630" y="288" width="20" height="20"></rect>
+                <rect x="1030" y="288" width="20" height="20"></rect>
+              </g>
+              <g class="switchboard-copy" aria-hidden="true">
+                <text x="150" y="124" class="route-label truth-copy">BUSINESS TRUTH</text>
+                <text x="150" y="336" class="route-label knowledge-copy">AGENT KNOWLEDGE</text>
+                <text x="250" y="38" text-anchor="middle" class="date-copy">JUL 01</text>
+                <text x="640" y="38" text-anchor="middle" class="date-copy">JUL 02</text>
+                <text x="1040" y="38" text-anchor="middle" class="date-copy">JUL 03</text>
+                <text x="250" y="188" text-anchor="middle" class="event-title">€0.15 RATE EFFECTIVE</text>
+                <text x="250" y="326" text-anchor="middle" class="event-note">€0.25 RATE VISIBLE</text>
+                <text x="640" y="118" text-anchor="middle" class="decision-label">DECISION</text>
+                <text x="640" y="186" text-anchor="middle" class="event-title">CALL BILLED</text>
+                <text x="640" y="326" text-anchor="middle" class="event-note">ONLY KNOWN RATE USED</text>
+                <text x="1040" y="188" text-anchor="middle" class="event-title">CORRECTION RECORDED</text>
+                <text x="1040" y="214" text-anchor="middle" class="event-note">TRUTH BECOMES QUERYABLE</text>
+                <text x="820" y="268" text-anchor="middle" class="gap-value">48 H</text>
+                <text x="820" y="288" text-anchor="middle" class="gap-label">KNOWLEDGE GAP</text>
+              </g>
+            </svg>
+
+            <ol class="switchboard-mobile" aria-label="48-hour gap between business truth and agent knowledge">
+              <li class="mobile-truth"><span>Jul 01</span><strong>€0.15 rate takes effect</strong></li>
+              <li class="mobile-knowledge"><span>Jul 02</span><strong>Agent sees €0.25 and bills the call</strong></li>
+              <li class="mobile-gap">
+                <strong><span class="mobile-gap-value">48 H</span><span class="mobile-gap-label">Knowledge gap</span></strong>
+              </li>
+              <li class="mobile-merge"><span>Jul 03</span><strong>Correction becomes queryable</strong></li>
+            </ol>
+          </div>
+        </figure>
+
+        <ol class="story-preview" aria-label="What the audit demonstrates">
+          <li><strong>Reconstruct</strong><span>truth and available knowledge</span></li>
+          <li><strong>Judge</strong><span>the decision without hindsight bias</span></li>
+          <li><strong>Learn</strong><span>from a safe, reusable remediation</span></li>
+        </ol>
+      </section>
+
+      <div id="dashboard" hidden>
+        <section id="outcome" class="case-section" aria-labelledby="case-one-title">
+          <header class="section-heading">
+            <div>
+              <p class="section-kicker">01 · Outcome</p>
+              <h2 id="case-one-title" tabindex="-1">The invoice was wrong. The agent wasn’t.</h2>
+            </div>
+            <span id="case-one-id" class="technical-id"></span>
+          </header>
+
+          <div class="verdict-strip" aria-label="Audit outcome">
+            <article class="metric-card metric-alert">
+              <span class="metric-label">Customer impact</span>
+              <strong id="hero-overcharge" class="metric-value">—</strong>
+              <span id="hero-comparison" class="metric-detail">—</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Knowability verdict</span>
+              <strong id="hero-verdict" class="metric-value metric-value-small">—</strong>
+              <span class="metric-detail">Deterministic temporal engine</span>
+            </article>
+            <article class="metric-card metric-success">
+              <span class="metric-label">Agent fault</span>
+              <strong id="hero-fault" class="metric-value">—</strong>
+              <span class="metric-detail">Based only on evidence available then</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">Knowledge gap</span>
+              <strong id="hero-gap" class="metric-value">—</strong>
+              <span class="metric-detail">Effective → queryable</span>
+            </article>
+          </div>
+
+          <ul
+            id="platform-badges"
+            class="platform-badges"
+            aria-label="Services used for this audit"
+            hidden
+          ></ul>
+
+          <article id="timeline-proof" class="panel timeline-panel" aria-labelledby="timeline-title">
+            <header class="panel-heading">
+              <div>
+                <p class="panel-kicker">02 · Timeline</p>
+                <h3 id="timeline-title">What was true vs what the agent could know</h3>
+              </div>
+              <p class="panel-note">All times are shown in UTC.</p>
+            </header>
+
+            <p class="panel-insight">
+              The correct rate took effect before the billing decision, but it did not become
+              queryable until 48 hours later.
+            </p>
+
+            <div class="temporal-register">
+              <div class="register-scale" aria-hidden="true">
+                <span>Rate takes effect</span>
+                <span>Call and billing decision</span>
+                <span>Correction becomes queryable</span>
+              </div>
+              <div
+                class="register-window"
+                aria-label="48-hour gap between effective time and recorded time"
+              >
+                <span class="window-cap window-cap-start" aria-hidden="true"></span>
+                <strong>48 h</strong>
+                <span>effective → recorded</span>
+                <span class="window-cap window-cap-end" aria-hidden="true"></span>
+              </div>
+
+              <section class="register-row truth-row" aria-labelledby="truth-title">
+                <header class="register-label">
+                  <span aria-hidden="true">T</span>
+                  <div>
+                    <h4 id="truth-title">Business truth</h4>
+                    <p>What actually applied to the call</p>
+                  </div>
+                </header>
+                <ol class="register-rail">
+                  <li class="register-event">
+                    <time id="truth-valid-date">—</time>
+                    <strong>Correct rate takes effect</strong>
+                    <span id="truth-rate">—</span>
+                  </li>
+                  <li class="register-event">
+                    <time id="truth-event-date">—</time>
+                    <strong>Call is billed</strong>
+                    <span id="truth-event-copy">—</span>
+                  </li>
+                  <li class="register-event">
+                    <time id="truth-recorded-date">—</time>
+                    <strong>Correction is recorded</strong>
+                    <span>The correct rate becomes queryable</span>
+                  </li>
+                </ol>
+                <p class="assertion-line">
+                  Reconstructed assertion: <code id="truth-assertion">—</code>
+                  <span id="truth-version"></span>
+                </p>
+              </section>
+
+              <section class="register-row knowledge-row" aria-labelledby="knowledge-title">
+                <header class="register-label">
+                  <span aria-hidden="true">K</span>
+                  <div>
+                    <h4 id="knowledge-title">Agent knowledge</h4>
+                    <p>What the agent could query at decision time</p>
+                  </div>
+                </header>
+                <ol class="register-rail">
+                  <li class="register-event">
+                    <time id="knowledge-known-date">—</time>
+                    <strong>Available rate</strong>
+                    <span id="knowledge-rate">—</span>
+                  </li>
+                  <li class="register-event">
+                    <time id="knowledge-decision-date">—</time>
+                    <strong>Decision is made</strong>
+                    <span>The agent uses the only version it can see</span>
+                  </li>
+                  <li class="register-event register-event-muted">
+                    <time id="knowledge-correction-date">—</time>
+                    <strong>Correction finally becomes visible</strong>
+                    <span>It was unavailable when the agent decided</span>
+                  </li>
+                </ol>
+                <p class="assertion-line">
+                  Selected assertion: <code id="knowledge-assertion">—</code>
+                  <span id="knowledge-version"></span>
+                </p>
+              </section>
+            </div>
+          </article>
+
+          <div class="two-column-grid outcome-explanation-grid">
+            <article class="panel verdict-panel" aria-labelledby="verdict-title">
+              <header class="panel-heading compact-heading">
+                <div>
+                  <p class="panel-kicker">Accountability verdict</p>
+                  <h3 id="verdict-title">Why the agent is not at fault</h3>
+                </div>
+              </header>
+              <p id="verdict-explanation" class="lead-copy"></p>
+              <dl class="amount-comparison">
+                <div><dt>Billed</dt><dd id="verdict-billed">—</dd></div>
+                <div><dt>Expected</dt><dd id="verdict-expected">—</dd></div>
+                <div class="amount-highlight"><dt>Refund</dt><dd id="verdict-refund">—</dd></div>
+              </dl>
+              <p class="root-cause">
+                Root cause: <strong id="verdict-root-cause">—</strong>
+              </p>
+            </article>
+
+            <article class="panel decision-panel" aria-labelledby="decision-summary-title">
+              <details class="progressive-details">
+                <summary>Inspect the original decision record</summary>
+                <header class="panel-heading compact-heading">
+                  <div>
+                    <p class="panel-kicker">Decision snapshot</p>
+                    <h3 id="decision-summary-title">Billing decision</h3>
+                  </div>
+                </header>
+                <dl class="summary-list">
+                  <div><dt>Event</dt><dd id="decision-event">—</dd></div>
+                  <div><dt>Agent</dt><dd id="decision-agent">—</dd></div>
+                  <div><dt>Action</dt><dd id="decision-action">—</dd></div>
+                  <div><dt>Duration</dt><dd id="decision-duration">—</dd></div>
+                  <div><dt>Amount</dt><dd id="decision-amount">—</dd></div>
+                  <div><dt>Selected rate</dt><dd id="decision-rate">—</dd></div>
+                  <div><dt>Decided at</dt><dd><time id="decision-date">—</time></dd></div>
+                  <div><dt>Decision ID</dt><dd><code id="decision-id">—</code></dd></div>
+                </dl>
+              </details>
+            </article>
+          </div>
+
+          <article id="evidence" class="panel evidence-panel" aria-labelledby="evidence-title">
+            <header class="panel-heading">
+              <div>
+                <p class="panel-kicker">03 · Evidence</p>
+                <h3 id="evidence-title">The missing record is part of the proof</h3>
+              </div>
+              <p class="panel-note">Available, retrieved, and used are separate states.</p>
+            </header>
+            <p class="panel-insight">
+              The corrected tariff was not in the agent’s record when it made the billing
+              decision. HindSight records both the evidence it used and the evidence it could
+              not have retrieved.
+            </p>
+            <details class="progressive-details evidence-details">
+              <summary>Inspect the full evidence trace</summary>
+              <div class="table-scroll">
+                <table>
+                  <caption class="sr-only">Evidence trace for the billing decision</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Evidence</th>
+                      <th scope="col">Available</th>
+                      <th scope="col">Retrieved</th>
+                      <th scope="col">Method</th>
+                      <th scope="col">Shown to model</th>
+                      <th scope="col">Used</th>
+                      <th scope="col">Exclusion reason</th>
+                    </tr>
+                  </thead>
+                  <tbody id="evidence-rows"></tbody>
+                </table>
+              </div>
+            </details>
+          </article>
+
+          <article id="safe-fix" class="panel remediation-panel" aria-labelledby="remediation-title">
+            <header class="panel-heading">
+              <div>
+                <p class="panel-kicker">04 · Safe fix</p>
+                <h3 id="remediation-title">Refund once. Replay without duplicates.</h3>
+              </div>
+              <span id="remediation-status" class="status-chip">—</span>
+            </header>
+            <div class="remediation-layout">
+              <dl class="remediation-metrics">
+                <div><dt>Final invoice</dt><dd id="remediation-invoice">—</dd></div>
+                <div><dt>Refund</dt><dd id="remediation-refund">—</dd></div>
+                <div><dt>Dispute</dt><dd id="remediation-dispute">—</dd></div>
+                <div><dt>Incidents opened</dt><dd id="remediation-incidents">—</dd></div>
+                <div><dt>Memories created</dt><dd id="remediation-memories">—</dd></div>
+                <div><dt>Applied runs</dt><dd id="remediation-runs">—</dd></div>
+              </dl>
+              <div class="attempts-block">
+                <p id="remediation-replay-note" class="panel-note"></p>
+                <details class="progressive-details">
+                  <summary>Inspect remediation attempts</summary>
+                  <h4 class="sr-only">Remediation attempts</h4>
+                  <ol id="remediation-attempts" class="attempt-list"></ol>
+                </details>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section id="learning" class="case-section learning-section" aria-labelledby="case-two-title">
+          <header class="section-heading">
+            <div>
+              <p class="section-kicker">05 · Learning</p>
+              <h2 id="case-two-title">The next investigation starts with precedent, not from zero.</h2>
+            </div>
+            <div class="case-two-meta">
+              <strong id="case-two-call">—</strong>
+              <span id="case-two-overcharge">—</span>
+            </div>
+          </header>
+
+          <div class="learning-change-strip" aria-label="Measured changes after memory retrieval">
+            <div><span>Cases reused</span><strong id="change-reuse">—</strong></div>
+            <div><span>Checklist loaded</span><strong id="change-checklist">—</strong></div>
+            <div><span>Recommendation</span><strong id="change-recommendation">—</strong></div>
+            <div><span>Root cause confirmed</span><strong id="change-root-cause">—</strong></div>
+          </div>
+
+          <div class="memory-comparison" aria-label="Investigation before and after procedural memory">
+            <article class="memory-card memory-before">
+              <header>
+                <span class="comparison-label">Before memory</span>
+                <h3>Investigation starts cold</h3>
+                <span id="before-memory-status" class="status-chip status-neutral">—</span>
+              </header>
+              <p id="before-recommendation" class="lead-copy"></p>
+              <div class="memory-stat">
+                <strong id="before-step-count">—</strong>
+                <span>procedural steps reused</span>
+              </div>
+              <ol id="before-checklist" class="checklist"></ol>
+            </article>
+
+            <div class="comparison-arrow" aria-hidden="true">→</div>
+
+            <article class="memory-card memory-after">
+              <header>
+                <span class="comparison-label">After memory</span>
+                <h3>Investigation starts with a proven playbook</h3>
+                <span id="after-memory-status" class="status-chip status-success">—</span>
+              </header>
+              <p id="after-recommendation" class="lead-copy"></p>
+              <div class="memory-stat">
+                <strong id="after-step-count">—</strong>
+                <span>steps loaded from a similar incident</span>
+              </div>
+              <ol id="after-checklist" class="checklist checklist-success"></ol>
+              <dl class="retrieval-summary">
+                <div><dt>Method</dt><dd id="after-method">—</dd></div>
+                <div><dt>Rank</dt><dd id="after-rank">—</dd></div>
+                <div><dt>Score</dt><dd id="after-score">—</dd></div>
+                <div><dt>Suggested cause</dt><dd id="after-root-cause">—</dd></div>
+              </dl>
+            </article>
+          </div>
+
+          <aside class="authority-boundary" aria-labelledby="boundary-title">
+            <div class="boundary-icon" aria-hidden="true">✓</div>
+            <div>
+              <h3 id="boundary-title">Memory advises. It never decides.</h3>
+              <p>
+                The verdict stays deterministic, financial calculations stay inside the
+                telecom adapter, and MCP access remains read-only.
+              </p>
+            </div>
+            <dl>
+              <div><dt>Verdict</dt><dd id="boundary-verdict">—</dd></div>
+              <div><dt>Finance</dt><dd id="boundary-financial">—</dd></div>
+            </dl>
+          </aside>
+
+          <section id="technical-proof" class="technical-proof-section" aria-label="Technical proof">
+            <article id="agent-proof" class="panel agent-panel" aria-labelledby="agent-title" hidden>
+              <header class="panel-heading">
+                <div>
+                  <p class="panel-kicker">06 · Technical proof</p>
+                  <h3 id="agent-title">The model explains. Deterministic systems decide.</h3>
+                </div>
+                <span id="agent-status" class="status-chip">—</span>
+              </header>
+              <div id="agent-explanation" class="agent-explanation"></div>
+
+              <div class="proof-grid">
+                <section aria-labelledby="bedrock-proof-title">
+                  <h4 id="bedrock-proof-title">Amazon Bedrock</h4>
+                  <dl class="proof-list">
+                    <div><dt>Model</dt><dd id="agent-model">—</dd></div>
+                    <div><dt>Turns</dt><dd id="agent-turns">—</dd></div>
+                    <div><dt>Role</dt><dd id="agent-role">—</dd></div>
+                  </dl>
+                </section>
+                <section aria-labelledby="mcp-proof-title">
+                  <h4 id="mcp-proof-title">CockroachDB Managed MCP</h4>
+                  <dl class="proof-list">
+                    <div><dt>Transport</dt><dd id="agent-transport">—</dd></div>
+                    <div><dt>Tool access</dt><dd id="agent-access">—</dd></div>
+                    <div><dt>Mutations</dt><dd id="agent-mutations">—</dd></div>
+                  </dl>
+                </section>
+                <section aria-labelledby="vector-proof-title">
+                  <h4 id="vector-proof-title">Vector memory</h4>
+                  <dl class="proof-list">
+                    <div><dt>Index</dt><dd id="vector-index">—</dd></div>
+                    <div><dt>Embedding</dt><dd id="vector-model">—</dd></div>
+                    <div><dt>Dimensions</dt><dd id="vector-dimensions">—</dd></div>
+                  </dl>
+                </section>
+              </div>
+
+              <details class="technical-details">
+                <summary>Inspect request-level proof</summary>
+                <dl class="technical-list">
+                  <div><dt>Agent run ID</dt><dd><code id="agent-run-id">—</code></dd></div>
+                  <div><dt>Context snapshot</dt><dd><code id="context-snapshot-id">—</code></dd></div>
+                  <div><dt>Tool calls</dt><dd><ul id="agent-tool-calls"></ul></dd></div>
+                  <div><dt>Request IDs</dt><dd><ul id="agent-request-ids"></ul></dd></div>
+                </dl>
+              </details>
+            </article>
+          </section>
+        </section>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-brand">
+        <img class="footer-mark" src="/assets/brand-mark.svg" alt="">
+        <div class="footer-brand-copy">
+          <strong aria-label="HindSight"><span>Hind</span><i aria-hidden="true"></i><span>Sight</span></strong>
+          <span>Judge the decision. Not the hindsight.</span>
+        </div>
+      </div>
+      <div class="footer-capabilities" aria-label="Core capabilities">
+        <span>Temporal SQL</span>
+        <span>Vector memory</span>
+        <span>Read-only MCP</span>
+      </div>
+      <p>Built for the CockroachDB × AWS hackathon.</p>
+    </footer>
+  </body>
+</html>

@@ -1,5 +1,7 @@
 # HindSight
 
+> Judge the decision. Not the hindsight.
+
 **Temporal Decision Accountability for AI Agents**
 
 HindSight reconstructs what was true, what an agent could know, what evidence it used,
@@ -8,8 +10,8 @@ synthetic telecom billing dispute caused by a late retroactive tariff.
 
 ## Current milestone
 
-This repository implements the deterministic P0 foundation and the first bounded
-Bedrock investigation slice:
+This repository implements the deterministic P0 foundation, the first bounded
+Bedrock investigation slice, and a deployable web demonstration:
 
 - generic bi-temporal assertions;
 - append-only fact versions with supersession metadata;
@@ -26,8 +28,12 @@ Bedrock investigation slice:
 - CockroachDB Distributed Vector Index retrieval over Bedrock Titan embeddings, with exact
   domain filters, temporal eligibility checks, similarity scores, and structured fallback;
 - a client-side Bedrock Converse tool-use loop with one case-scoped read-only tool;
+- an optional CockroachDB Cloud Managed MCP transport that serves that tool through one
+  fixed, bounded `select_query` instead of exposing SQL generation to the model;
 - durable CockroachDB `agent_runs` and `tool_calls` traces, including bounded inputs,
   results, token usage, stop reasons, and sanitized failures;
+- a FastAPI health/demo boundary and one responsive dashboard that renders the decision,
+  temporal timelines, evidence, remediation, and before/after memory proof;
 - idempotent demo data, focused tests, and a CLI proof with a safe replay.
 
 The demo proves that a EUR 0.15 rate is current truth while the billing agent could only
@@ -44,11 +50,17 @@ Requirements: [uv](https://docs.astral.sh/uv/) and Python 3.12–3.14.
 ```bash
 uv sync
 uv run hindsight demo
+uv run hindsight serve
 uv run pytest
 ```
 
 The demo command uses a local in-memory repository so contributors can verify the
 domain logic without secrets. It exercises the same service layer used by CockroachDB.
+The dashboard is then available at `http://127.0.0.1:8000`. It does not mutate on page load:
+the explicit **Run the audit** button calls `POST /demo/seed`, which is idempotent and uses
+CockroachDB when `DATABASE_URL` is configured. `GET /health` probes the database with `SELECT 1`.
+The web replay never invokes billable Bedrock, vector, or MCP operations implicitly; those proofs
+remain explicit CLI commands below.
 
 To run the proof against CockroachDB, configure separate schema-owner and least-privilege
 runtime URLs in the environment:
@@ -98,6 +110,24 @@ agent investigation, run:
 uv run --env-file .env hindsight demo --cockroach --vector --bedrock
 ```
 
+To route the same case-scoped evidence tool through the
+[CockroachDB Cloud Managed MCP Server](https://www.cockroachlabs.com/docs/cockroachcloud/connect-to-the-cockroachdb-cloud-mcp-server),
+set `COCKROACH_MCP_CLUSTER_ID` and `COCKROACH_MCP_API_KEY` for a dedicated service account,
+run the new migration, then add `--mcp`:
+
+```bash
+uv run --env-file .env hindsight migrate
+uv run --env-file .env hindsight demo --cockroach --vector --bedrock --mcp
+```
+
+The deterministic application persists immutable, content-addressed context snapshots, so the
+same dispute can safely have distinct structured and vector-memory views. Each agent run records
+the exact snapshot ID it was assigned. Bedrock still sees only `get_investigation_context`; the
+orchestrator maps it to one `select_query` constrained by that snapshot ID and dispute UUID with
+`LIMIT 1`. The MCP response is bounded before parsing and the final tool result remains capped at
+64 KB. The API key is never accepted as a CLI argument and should live in AWS Secrets Manager for
+deployment.
+
 The command fails closed if the model skips the evidence tool, requests another case,
 uses an unknown tool, returns no final explanation, or exceeds the fixed turn/tool
 budgets. The model only explains an already computed result: it cannot change a verdict,
@@ -137,7 +167,7 @@ flowchart TB
         BILLING_AGENT["○ Bedrock Billing Agent"]
         INVESTIGATION_AGENT["✅ Bedrock Investigation Agent<br/>live Converse tool use"]
         REMEDIATION_AGENT["○ Bedrock Remediation Agent"]
-        API["○ Web API"]
+        API["✅ FastAPI demo API"]
     end
 
     subgraph CORE["Deterministic accountability core"]
@@ -154,11 +184,12 @@ flowchart TB
         OPERATIONS["✅ CDRs, invoices, disputes,<br/>refunds and incidents"]
         MEMORY["✅ Procedural memory +<br/>bi-temporal retrieval"]
         AGENT_JOURNAL["✅ Agent runs + tool calls"]
+        CONTEXT_SNAPSHOT["✅ Versioned investigation<br/>context snapshots"]
         VECTOR["✅ Distributed Vector Index<br/>temporal semantic retrieval"]
-        MCP["▶ Managed MCP Server<br/>read-only investigation"]
+        MCP["✅ Managed MCP Server<br/>read-only investigation"]
     end
 
-    DASHBOARD["○ Public investigation dashboard"]
+    DASHBOARD["✅ Single-screen investigation dashboard"]
 
     TARIFFS --> INGEST
     CDRS --> INGEST
@@ -171,9 +202,11 @@ flowchart TB
 
     INVESTIGATION_AGENT --> CONTEXT_TOOL
     INVESTIGATION_AGENT --> AGENT_JOURNAL
-    CONTEXT_TOOL --> ASSERTIONS
-    CONTEXT_TOOL --> JOURNAL
-    CONTEXT_TOOL --> MEMORY
+    CONTEXT_TOOL --> MCP
+    MCP --> CONTEXT_SNAPSHOT
+    ASSERTIONS --> CONTEXT_SNAPSHOT
+    JOURNAL --> CONTEXT_SNAPSHOT
+    MEMORY --> CONTEXT_SNAPSHOT
     ASSERTIONS --> VERDICT
     JOURNAL --> VERDICT
 
@@ -192,9 +225,8 @@ flowchart TB
     API --> DASHBOARD
 ```
 
-The next milestone replaces the local read-only investigation tool boundary with CockroachDB
-Managed MCP. The public API, dashboard, AWS deployment, observability, and access-control
-hardening follow after that integration.
+The next milestone is the public AWS deployment boundary, followed by S3/Lambda ingestion,
+observability, and access-control hardening.
 
 ## Demo data and safety
 
