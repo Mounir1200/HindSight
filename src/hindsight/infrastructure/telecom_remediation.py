@@ -398,9 +398,7 @@ class CockroachTelecomRemediationRepository:
         if row is None:
             raise RemediationStateError("remediation claim was not visible")
         if _json_object(row["request"]) != request:
-            raise RemediationConflictError(
-                "remediation key already identifies a different request"
-            )
+            raise RemediationConflictError("remediation key already identifies a different request")
         if str(row["status"]) != "applied" or row["result"] is None:
             raise RemediationStateError("existing remediation is incomplete")
         return remediation_receipt_from_result(
@@ -504,9 +502,7 @@ class CockroachTelecomRemediationRepository:
                 selected_assertion_id=UUID(str(row["selected_assertion_id"])),
                 dispute_status=str(row["dispute_status"]),
                 refund_amount=(
-                    _decimal(row["refund_amount"])
-                    if row["refund_amount"] is not None
-                    else None
+                    _decimal(row["refund_amount"]) if row["refund_amount"] is not None else None
                 ),
                 refund_count=int(row["refund_count"]),
                 incident_count=int(row["incident_count"]),
@@ -537,10 +533,7 @@ class CockroachTelecomRemediationRepository:
                     lookup.limit,
                 ),
             ).fetchall()
-        hits = tuple(
-            _memory_hit_from_row(row, rank)
-            for rank, row in enumerate(rows, start=1)
-        )
+        hits = tuple(_memory_hit_from_row(row, rank) for rank, row in enumerate(rows, start=1))
         return ProceduralMemoryRetrieval(lookup, "structured_exact", hits)
 
     def _validate_seed(
@@ -553,8 +546,7 @@ class CockroachTelecomRemediationRepository:
         if status == "issued":
             if (
                 _decimal(row["invoice_amount"]) != seed.billed_amount
-                or UUID(str(row["invoice_selected_assertion_id"]))
-                != seed.selected_assertion_id
+                or UUID(str(row["invoice_selected_assertion_id"])) != seed.selected_assertion_id
             ):
                 raise RemediationConflictError("issued invoice does not match the case seed")
             return
@@ -583,10 +575,7 @@ class CockroachTelecomRemediationRepository:
             try:
                 return operation()
             except Exception as error:
-                if (
-                    getattr(error, "sqlstate", None) != "40001"
-                    or attempt == self._max_retries
-                ):
+                if getattr(error, "sqlstate", None) != "40001" or attempt == self._max_retries:
                     raise
                 delay = min(0.5, 0.05 * 2**attempt) + random.uniform(0, 0.01)
                 time.sleep(delay)
@@ -624,9 +613,8 @@ def _validate_financial_context(
     invoice: Mapping[str, Any],
     plan: TelecomRemediationPlan,
 ) -> None:
-    if (
-        UUID(str(context["decision_selected_assertion_id"]))
-        != UUID(str(invoice["selected_assertion_id"]))
+    if UUID(str(context["decision_selected_assertion_id"])) != UUID(
+        str(invoice["selected_assertion_id"])
     ):
         raise RemediationConflictError("invoice assertion does not match the decision")
     if UUID(str(context["current_truth_assertion_id"])) != plan.corrected_assertion_id:

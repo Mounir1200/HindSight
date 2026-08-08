@@ -116,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             access_log=False,
             log_config=log_config,
+            proxy_headers=False,
         )
         return 0
 

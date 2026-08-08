@@ -54,9 +54,7 @@ def _demo_case(
 DEMO_TARIFF_KEY = "FR-SN-VOICE"
 DEMO_ROUTE = "FR->SN"
 DEMO_SERVICE_TYPE = "voice"
-DEMO_DISPUTE_CLAIM = (
-    "The call was billed using a tariff superseded by a retroactive correction."
-)
+DEMO_DISPUTE_CLAIM = "The call was billed using a tariff superseded by a retroactive correction."
 PRIMARY_DEMO_CASE = _demo_case(
     "retroactive-telecom-rate",
     "CALL-2026-07-02-001",

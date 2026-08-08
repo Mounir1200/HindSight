@@ -1,3 +1,5 @@
+import json
+import logging
 import os
 from collections import Counter
 from collections.abc import Callable, Mapping
@@ -28,6 +30,7 @@ from hindsight.infrastructure.telecom_remediation import (
     CockroachTelecomRemediationRepository,
 )
 from hindsight.infrastructure.vector_memory import CockroachTelecomVectorMemoryStore
+from hindsight.web.rate_limit import RateLimiter, RateLimitUnavailableError
 
 MAX_AGENT_ID_LENGTH = 64
 MAX_ROUTE_LENGTH = 128
@@ -52,6 +55,7 @@ _QUERY_FIELDS = frozenset(
         "limit",
     }
 )
+logger = logging.getLogger("hindsight.web")
 
 
 def _validate_server_text(value: str, field: str, max_length: int) -> None:
@@ -231,6 +235,7 @@ def create_memory_search_router(
     reader: ProceduralMemoryReader,
     *,
     policy: AgentMemoryPolicy = DEFAULT_MEMORY_POLICY,
+    rate_limiter: RateLimiter | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["memory"])
 
@@ -276,10 +281,140 @@ def create_memory_search_router(
         except ValueError as error:
             raise HTTPException(status_code=422, detail="invalid_memory_search") from error
 
+        provider_lease = None
+        provider_limited = rate_limiter is not None and bool(
+            getattr(reader, "vector_enabled", False)
+        )
+        if provider_limited and rate_limiter is not None:
+            try:
+                lease_decision = await run_in_threadpool(
+                    rate_limiter.acquire_operation_lease,
+                    "memory-search-provider",
+                )
+            except RateLimitUnavailableError:
+                correlation_id = getattr(request.state, "correlation_id", "")
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "rate_limit_unavailable",
+                            "correlation_id": correlation_id,
+                            "operation": "provider-concurrency",
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "rate_limit_unavailable",
+                        "correlation_id": correlation_id,
+                    },
+                    headers={"Cache-Control": "no-store"},
+                )
+            if lease_decision is not None and not lease_decision.acquired:
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "rate_limit_rejected",
+                            "correlation_id": getattr(
+                                request.state,
+                                "correlation_id",
+                                "",
+                            ),
+                            "operation": "provider-concurrency",
+                            "policy": lease_decision.policy_id,
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "rate_limit_exceeded"},
+                    headers={
+                        **lease_decision.headers,
+                        "Cache-Control": "no-store",
+                    },
+                )
+            provider_lease = lease_decision.lease if lease_decision is not None else None
+
         try:
+            if provider_limited and rate_limiter is not None:
+                principal = getattr(request.state, "rate_limit_principal", "global")
+                try:
+                    provider_limit = await run_in_threadpool(
+                        rate_limiter.check_operation,
+                        "memory-search-provider",
+                        principal,
+                    )
+                except RateLimitUnavailableError:
+                    correlation_id = getattr(request.state, "correlation_id", "")
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "rate_limit_unavailable",
+                                "correlation_id": correlation_id,
+                                "operation": "memory-search-provider",
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
+                    return JSONResponse(
+                        status_code=503,
+                        content={
+                            "detail": "rate_limit_unavailable",
+                            "correlation_id": correlation_id,
+                        },
+                        headers={"Cache-Control": "no-store"},
+                    )
+                if provider_limit is not None and not provider_limit.allowed:
+                    logger.warning(
+                        json.dumps(
+                            {
+                                "event": "rate_limit_rejected",
+                                "correlation_id": getattr(
+                                    request.state,
+                                    "correlation_id",
+                                    "",
+                                ),
+                                "operation": "memory-search-provider",
+                                "policy": provider_limit.policy_id,
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": "rate_limit_exceeded"},
+                        headers={
+                            **provider_limit.headers,
+                            "Cache-Control": "no-store",
+                        },
+                    )
             retrieval = await run_in_threadpool(reader.retrieve, lookup)
         except Exception as error:
             raise HTTPException(status_code=503, detail="memory_search_unavailable") from error
+        finally:
+            if provider_limited and rate_limiter is not None and provider_lease is not None:
+                try:
+                    await run_in_threadpool(
+                        rate_limiter.release_operation_lease,
+                        provider_lease,
+                    )
+                except RateLimitUnavailableError:
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "rate_limit_lease_release_failed",
+                                "correlation_id": getattr(
+                                    request.state,
+                                    "correlation_id",
+                                    "",
+                                ),
+                                "operation": "provider-concurrency",
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
 
         payload = _response_payload(validated_agent_id, scope, retrieval, limit)
         return JSONResponse(

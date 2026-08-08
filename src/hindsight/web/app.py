@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -32,6 +33,11 @@ from hindsight.infrastructure.database import connect_database
 from hindsight.web.memory_search import (
     build_memory_search_reader,
     create_memory_search_router,
+)
+from hindsight.web.rate_limit import (
+    RateLimiter,
+    RateLimitUnavailableError,
+    build_rate_limiter,
 )
 from hindsight.web.runtime import DemoRuntimeConfig
 
@@ -206,17 +212,35 @@ def create_app(
     health_probe: HealthProbe | None = None,
     workspace_reader: WorkspaceReader | None = None,
     decision_reader: DecisionReader | None = None,
+    rate_limiter: RateLimiter | None = None,
 ) -> FastAPI:
     logger.setLevel(_log_level())
     resolved_database_url = database_url if database_url is not None else os.getenv("DATABASE_URL")
     backend = "cockroachdb" if resolved_database_url else "in_memory"
-    runner = demo_runner or DemoRuntimeConfig.from_environment(resolved_database_url).runner()
+    if demo_runner is None:
+        runtime_config = DemoRuntimeConfig.from_environment(resolved_database_url)
+        runner = runtime_config.runner()
+        demo_uses_provider = (
+            runtime_config.bedrock_model_id is not None or runtime_config.vector_enabled
+        )
+    else:
+        runner = demo_runner
+        demo_uses_provider = True
     resetter = demo_resetter or _demo_resetter(resolved_database_url)
     reset_token = _configured_reset_token()
     probe = health_probe or _health_probe(resolved_database_url)
     workspace_state = _empty_workspace()
     demo_state = "empty"
     state_lock = Lock()
+    limiter = rate_limiter or build_rate_limiter(resolved_database_url)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        await run_in_threadpool(limiter.open)
+        try:
+            yield
+        finally:
+            await run_in_threadpool(limiter.close)
 
     def read_workspace() -> dict[str, object]:
         persisted = _empty_workspace()
@@ -242,9 +266,13 @@ def create_app(
         version="0.1.0",
         docs_url=None,
         redoc_url=None,
+        lifespan=lifespan,
     )
     app.include_router(
-        create_memory_search_router(build_memory_search_reader(resolved_database_url))
+        create_memory_search_router(
+            build_memory_search_reader(resolved_database_url),
+            rate_limiter=limiter,
+        )
     )
 
     @app.middleware("http")
@@ -252,23 +280,82 @@ def create_app(
         correlation_id = str(uuid4())
         started_at = perf_counter()
         request.state.correlation_id = correlation_id
+        rate_decision = None
+        peer_host = request.client.host if request.client is not None else None
+        forwarded_for = tuple(request.headers.getlist("x-forwarded-for"))
+        principal = limiter.resolve_client_principal(peer_host, forwarded_for)
+        request.state.rate_limit_principal = principal
         try:
-            response = await call_next(request)
-        except Exception as error:
+            rate_decision = await run_in_threadpool(
+                limiter.check,
+                method=request.method,
+                path=request.scope.get("path", request.url.path),
+                peer_host=peer_host,
+                forwarded_for=forwarded_for,
+                principal=principal,
+            )
+        except RateLimitUnavailableError:
             logger.error(
                 json.dumps(
                     {
-                        "event": "request_failed",
+                        "event": "rate_limit_unavailable",
                         "correlation_id": correlation_id,
-                        "error_type": type(error).__name__,
+                        "method": request.method,
+                        "path": request.url.path,
                     },
                     separators=(",", ":"),
                 )
             )
             response = JSONResponse(
-                status_code=500,
-                content={"detail": "internal_error", "correlation_id": correlation_id},
+                status_code=503,
+                content={
+                    "detail": "rate_limit_unavailable",
+                    "correlation_id": correlation_id,
+                },
             )
+        else:
+            if rate_decision is not None and not rate_decision.allowed:
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "rate_limit_rejected",
+                            "correlation_id": correlation_id,
+                            "method": request.method,
+                            "path": request.url.path,
+                            "policy": rate_decision.policy_id,
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+                response = JSONResponse(
+                    status_code=429,
+                    content={"detail": "rate_limit_exceeded"},
+                )
+            else:
+                try:
+                    response = await call_next(request)
+                except Exception as error:
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "request_failed",
+                                "correlation_id": correlation_id,
+                                "error_type": type(error).__name__,
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
+                    response = JSONResponse(
+                        status_code=500,
+                        content={
+                            "detail": "internal_error",
+                            "correlation_id": correlation_id,
+                        },
+                    )
+        if rate_decision is not None:
+            for name, value in rate_decision.headers.items():
+                if name not in response.headers:
+                    response.headers[name] = value
         response.headers["X-Correlation-ID"] = correlation_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -277,13 +364,19 @@ def create_app(
             "style-src 'self'; script-src 'self'; base-uri 'none'; "
             "frame-ancestors 'none'; form-action 'self'"
         )
-        if request.url.path.startswith("/decisions/") or request.url.path in {
-            "/health",
-            "/demo/prepare",
-            "/demo/reset",
-            "/demo/seed",
-            "/demo/workspace",
-        }:
+        if (
+            request.url.path.startswith("/decisions/")
+            or request.url.path
+            in {
+                "/health",
+                "/ready",
+                "/demo/prepare",
+                "/demo/reset",
+                "/demo/seed",
+                "/demo/workspace",
+            }
+            or response.status_code in {429, 503}
+        ):
             response.headers["Cache-Control"] = "no-store"
         logger.info(
             json.dumps(
@@ -302,13 +395,24 @@ def create_app(
 
     @app.get("/health", tags=["operations"])
     async def health() -> JSONResponse:
+        return JSONResponse(
+            content={
+                "status": "ok",
+                "backend": backend,
+                "database": "unchecked",
+            }
+        )
+
+    @app.get("/ready", tags=["operations"])
+    async def readiness() -> JSONResponse:
         try:
             await run_in_threadpool(probe)
+            await run_in_threadpool(limiter.probe)
         except Exception as error:
             logger.warning(
                 json.dumps(
                     {
-                        "event": "health_check_failed",
+                        "event": "readiness_check_failed",
                         "error_type": type(error).__name__,
                     },
                     separators=(",", ":"),
@@ -316,10 +420,16 @@ def create_app(
             )
             return JSONResponse(
                 status_code=503,
-                content={"status": "unhealthy", "backend": backend},
+                content={"status": "not_ready", "backend": backend},
             )
         database = "reachable" if resolved_database_url else "not_configured"
-        return JSONResponse(content={"status": "ok", "backend": backend, "database": database})
+        return JSONResponse(
+            content={
+                "status": "ready",
+                "backend": backend,
+                "database": database,
+            }
+        )
 
     if reset_token is not None:
 
@@ -341,6 +451,49 @@ def create_app(
                     status_code=403,
                     content={"detail": "demo_reset_forbidden"},
                 )
+
+            try:
+                authorized_limit = await run_in_threadpool(
+                    limiter.check_operation,
+                    "demo-reset-authorized",
+                )
+            except RateLimitUnavailableError:
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "rate_limit_unavailable",
+                            "correlation_id": request.state.correlation_id,
+                            "operation": "demo-reset-authorized",
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "rate_limit_unavailable",
+                        "correlation_id": request.state.correlation_id,
+                    },
+                )
+            if authorized_limit is not None and not authorized_limit.allowed:
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "rate_limit_rejected",
+                            "correlation_id": request.state.correlation_id,
+                            "operation": "demo-reset-authorized",
+                            "policy": authorized_limit.policy_id,
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+                response = JSONResponse(
+                    status_code=429,
+                    content={"detail": "rate_limit_exceeded"},
+                )
+                for name, value in authorized_limit.headers.items():
+                    response.headers[name] = value
+                return response
 
             with state_lock:
                 if demo_state == "running":
@@ -389,13 +542,131 @@ def create_app(
                 )
             incident = workspace_state["reported_incidents"][0]
             demo_state = "running"
+        lease_decision = None
+        if demo_uses_provider:
+            try:
+                lease_decision = await run_in_threadpool(
+                    limiter.acquire_operation_lease,
+                    "demo-seed-provider",
+                )
+            except RateLimitUnavailableError:
+                with state_lock:
+                    demo_state = "prepared"
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "rate_limit_unavailable",
+                            "correlation_id": request.state.correlation_id,
+                            "operation": "provider-concurrency",
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "rate_limit_unavailable",
+                        "correlation_id": request.state.correlation_id,
+                    },
+                )
+            if lease_decision is not None and not lease_decision.acquired:
+                with state_lock:
+                    demo_state = "prepared"
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "rate_limit_rejected",
+                            "correlation_id": request.state.correlation_id,
+                            "operation": "provider-concurrency",
+                            "policy": lease_decision.policy_id,
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+                response = JSONResponse(
+                    status_code=429,
+                    content={"detail": "rate_limit_exceeded"},
+                )
+                for name, value in lease_decision.headers.items():
+                    response.headers[name] = value
+                return response
+        provider_lease = lease_decision.lease if lease_decision is not None else None
         try:
-            payload = await run_in_threadpool(runner)
-        except Exception as error:
-            with state_lock:
-                demo_state = "prepared"
-            _log_demo_agent_failure(request.state.correlation_id, error)
-            raise
+            execution_operation = (
+                "demo-seed-provider" if demo_uses_provider else "demo-seed-execution"
+            )
+            try:
+                execution_limit = await run_in_threadpool(
+                    limiter.check_operation,
+                    execution_operation,
+                    request.state.rate_limit_principal,
+                )
+            except RateLimitUnavailableError:
+                with state_lock:
+                    demo_state = "prepared"
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "rate_limit_unavailable",
+                            "correlation_id": request.state.correlation_id,
+                            "operation": execution_operation,
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "rate_limit_unavailable",
+                        "correlation_id": request.state.correlation_id,
+                    },
+                )
+            if execution_limit is not None and not execution_limit.allowed:
+                with state_lock:
+                    demo_state = "prepared"
+                logger.warning(
+                    json.dumps(
+                        {
+                            "event": "rate_limit_rejected",
+                            "correlation_id": request.state.correlation_id,
+                            "operation": execution_operation,
+                            "policy": execution_limit.policy_id,
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+                response = JSONResponse(
+                    status_code=429,
+                    content={"detail": "rate_limit_exceeded"},
+                )
+                for name, value in execution_limit.headers.items():
+                    response.headers[name] = value
+                return response
+            try:
+                payload = await run_in_threadpool(runner)
+            except Exception as error:
+                with state_lock:
+                    demo_state = "prepared"
+                _log_demo_agent_failure(request.state.correlation_id, error)
+                raise
+        finally:
+            if provider_lease is not None:
+                try:
+                    await run_in_threadpool(
+                        limiter.release_operation_lease,
+                        provider_lease,
+                    )
+                except RateLimitUnavailableError:
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "rate_limit_lease_release_failed",
+                                "correlation_id": request.state.correlation_id,
+                                "operation": "provider-concurrency",
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
         if not _valid_demo_result(payload, incident):
             with state_lock:
                 demo_state = "prepared"

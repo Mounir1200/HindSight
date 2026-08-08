@@ -18,6 +18,11 @@ TRUTH_ID = UUID("10000000-0000-0000-0000-000000000002")
 KNOWLEDGE_ID = UUID("10000000-0000-0000-0000-000000000003")
 
 
+@pytest.fixture(autouse=True)
+def _disable_default_rate_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HINDSIGHT_RATE_LIMIT_ENABLED", "false")
+
+
 def _demo_payload(*, include_second_case: bool = False) -> dict[str, object]:
     payload: dict[str, object] = {
         "backend": "in_memory",
@@ -101,23 +106,38 @@ def _decision_view(*, evidence_count: int = 1) -> dict[str, object]:
 
 
 @pytest.mark.parametrize("fails", [False, True])
-def test_health_reports_probe_state_without_leaking_errors(fails: bool) -> None:
+def test_readiness_reports_probe_state_without_leaking_errors(fails: bool) -> None:
     def probe() -> None:
         if fails:
             raise RuntimeError("secret database detail")
 
     with TestClient(create_app(database_url="configured", health_probe=probe)) as client:
-        response = client.get("/health")
+        response = client.get("/ready")
 
     assert response.status_code == (503 if fails else 200)
     assert response.json() == (
-        {"status": "unhealthy", "backend": "cockroachdb"}
+        {"status": "not_ready", "backend": "cockroachdb"}
         if fails
-        else {"status": "ok", "backend": "cockroachdb", "database": "reachable"}
+        else {"status": "ready", "backend": "cockroachdb", "database": "reachable"}
     )
     assert "secret" not in response.text
     assert response.headers["x-correlation-id"]
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_liveness_does_not_depend_on_the_database_probe() -> None:
+    def probe() -> None:
+        raise RuntimeError("database unavailable")
+
+    with TestClient(create_app(database_url="configured", health_probe=probe)) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "backend": "cockroachdb",
+        "database": "unchecked",
+    }
 
 
 def test_request_log_is_structured_and_does_not_record_the_query(caplog) -> None:
