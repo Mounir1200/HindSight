@@ -322,6 +322,16 @@ parameters as well. The showcase fixes `RateLimitScale=1` and `ProviderConcurren
 production operator can select larger reviewed values without rebuilding the image, but only
 within the approved CockroachDB and provider-spend budget.
 
+`ProviderConcurrency` is a fleet-wide ceiling, not a per-task one: the concurrency lease is held
+in CockroachDB under a single key shared by every replica. Raising `MaxTaskCount` therefore adds
+request capacity and database capacity but no provider capacity; provider throughput only moves
+when `ProviderConcurrency` moves, which is what keeps provider spend bounded independently of
+scale. The same lease has an operational consequence: a task that dies mid-audit keeps its slot
+until the lease expires, so fleet provider capacity can stay reduced by up to the lease TTL
+(currently 600 seconds, derived from the provider timeouts) after a crash or a rolling
+replacement under load. Provisioning `ProviderConcurrency` above the steady-state need absorbs
+that window.
+
 Infrastructure definitions are reproducible deployment inputs, not performance or availability
 evidence by themselves. Record the image digest, stack outputs, health/readiness, WAF behavior,
 alarms, capacity, and correlated CloudWatch traces only after an authorized deployment. Do not
@@ -376,7 +386,10 @@ Default application policy:
 
 Rejected requests return `429` with `Retry-After`, `RateLimit-Limit`,
 `RateLimit-Remaining`, and `RateLimit-Reset`. A distributed limiter failure returns `503`
-before a protected handler can invoke CockroachDB, Bedrock, Titan, or MCP. `/health` is a
+before a protected handler can invoke CockroachDB, Bedrock, Titan, or MCP. A saturated business
+pool is reported the same way: an exhausted checkout returns `503 database_capacity_unavailable`
+with `Retry-After`, so pool saturation is measurable as shed load rather than hidden inside the
+generic `500` rate. `/health` is a
 static liveness check and is exempt from application rate limiting: it carries no forwarded
 address, so it resolves to the same principal as any request whose `X-Forwarded-For` cannot be
 parsed, and a shared bucket would let that traffic throttle the probe and deregister the task.

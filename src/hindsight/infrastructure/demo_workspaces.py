@@ -10,8 +10,14 @@ from threading import Lock
 from typing import Any
 from uuid import UUID
 
+from hindsight.infrastructure.database import DatabaseCapacityError
+
 MAX_WORKSPACE_ID_LENGTH = 128
-MAX_PAYLOAD_BYTES = 64_000
+# The migration caps the stored payload at 64000 bytes, measured on the JSONB value
+# rendered back to text. CockroachDB renders JSONB with a space after every ':' and
+# ',', so that rendering is larger than the compact encoding checked here. Half the
+# stored cap absorbs that expansion for any object shape.
+MAX_PAYLOAD_BYTES = 32_000
 MAX_LEASE_SECONDS = 3_600
 
 _WORKSPACE_COLUMNS = """
@@ -375,7 +381,7 @@ class CockroachDemoWorkspaceRepository:
         try:
             with self._connection_factory() as connection:
                 return _fetch_workspace(connection, workspace_id)
-        except DemoWorkspaceError:
+        except (DemoWorkspaceError, DatabaseCapacityError):
             raise
         except Exception as error:
             raise DemoWorkspaceStoreError("demo workspace could not be read") from error
@@ -538,7 +544,7 @@ class CockroachDemoWorkspaceRepository:
             try:
                 with self._connection_factory() as connection, connection.transaction():
                     return operation(connection)
-            except DemoWorkspaceError:
+            except (DemoWorkspaceError, DatabaseCapacityError):
                 raise
             except Exception as error:
                 retryable = isinstance(error, _RetryableWorkspaceRace) or (

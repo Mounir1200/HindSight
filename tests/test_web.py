@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import hindsight.web.app as web_app_module
 from hindsight.adapters.telecom.seed import FOLLOW_UP_DEMO_CASE, PRIMARY_DEMO_CASE
+from hindsight.infrastructure.database import DatabaseCapacityError
 from hindsight.web.app import create_app
 
 DECISION_ID = UUID("10000000-0000-0000-0000-000000000001")
@@ -818,6 +819,51 @@ def test_cockroach_demo_reset_uses_one_bounded_parameterized_transaction(
         str(FOLLOW_UP_DEMO_CASE.dispute_id),
     }
     assert all(fixture_id not in sql for sql, _ in connection.calls for fixture_id in fixture_ids)
+
+
+def test_pool_exhaustion_sheds_the_request_instead_of_reporting_an_internal_error() -> None:
+    def exhausted_reader() -> dict[str, object]:
+        raise DatabaseCapacityError("no pooled database connection became available")
+
+    with TestClient(
+        create_app(
+            database_url="postgresql://configured",
+            demo_runner=lambda: _demo_payload(),
+            workspace_reader=exhausted_reader,
+            workspace_repository=web_app_module.InMemoryDemoWorkspaceRepository(),
+        )
+    ) as client:
+        response = client.get("/demo/workspace")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "database_capacity_unavailable"
+    assert response.headers["Retry-After"] == "5"
+
+
+def test_a_workspace_without_a_usable_incident_releases_its_lease() -> None:
+    """Failing after the claim without restoring would leave the row running until
+    the lease expires, blocking every replica for the whole TTL."""
+    workspaces = web_app_module.InMemoryDemoWorkspaceRepository()
+    workspaces.prepare("showcase", {"reported_incidents": [{}], "past_audits": []})
+
+    def unreachable_runner() -> dict[str, object]:
+        raise AssertionError("the audit must not start without a usable incident")
+
+    with TestClient(
+        create_app(
+            database_url="",
+            demo_runner=unreachable_runner,
+            workspace_repository=workspaces,
+        )
+    ) as client:
+        response = client.post("/demo/seed")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "no_reported_incident"}
+    record = workspaces.read("showcase")
+    assert record is not None
+    assert record.state is web_app_module.DemoWorkspaceState.PREPARED
+    assert record.lease_token is None
 
 
 def test_dashboard_and_assets_are_served_from_the_same_origin() -> None:

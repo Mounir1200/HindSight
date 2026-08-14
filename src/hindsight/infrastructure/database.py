@@ -10,7 +10,7 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout, TooManyRequests
 
 from hindsight.telemetry import current_performance_span
 
@@ -38,6 +38,14 @@ DATABASE_POOL_MAX_WAITING = 100
 VALIDATE_DATABASE_CONNECTION_SQL = "SELECT 1 AS healthy"
 
 PoolFactory = Callable[..., Any]
+
+
+class DatabaseCapacityError(RuntimeError):
+    """Raised when no pooled connection became available within the checkout timeout.
+
+    This is saturation, not failure: the caller should shed the request with a
+    retryable status rather than report it as an internal error.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,14 +205,20 @@ class CockroachDatabasePool:
         """Borrow one validated connection and always return it to the pool."""
 
         self._require_open()
-        with (
-            current_performance_span(
-                component="cockroach",
-                operation="connection.checkout",
-            ),
-            self._pool.connection(timeout=self._config.timeout_seconds) as connection,
-        ):
-            yield connection
+        try:
+            with (
+                current_performance_span(
+                    component="cockroach",
+                    operation="connection.checkout",
+                ),
+                self._pool.connection(timeout=self._config.timeout_seconds) as connection,
+            ):
+                yield connection
+        except (PoolTimeout, TooManyRequests) as error:
+            # Two distinct saturation signals: the checkout waited out its timeout, or
+            # DATABASE_POOL_MAX_WAITING callers were already queued ahead of it.
+            # TooManyRequests does not derive from PoolTimeout, so it needs naming.
+            raise DatabaseCapacityError("the database pool could not admit the request") from error
 
     def validate(self) -> None:
         """Prove that the pool can execute a minimal query on a live connection."""

@@ -17,6 +17,13 @@ from hindsight.agents.investigation import (
 from hindsight.telemetry import current_performance_span
 
 DEFAULT_MANAGED_MCP_ENDPOINT = "https://cockroachlabs.cloud/mcp"
+# One ``select`` opens a session, lists the tools, then calls one. Each phase carries
+# its own read timeout, so the phase timeout alone bounds a single stall rather than
+# the request: only the deadline below bounds the whole exchange, and the provider
+# concurrency lease is sized against that deadline.
+MANAGED_MCP_PHASE_TIMEOUT_SECONDS = 15.0
+MANAGED_MCP_DEADLINE_SECONDS = 20.0
+MAX_MANAGED_MCP_DEADLINE_SECONDS = 60.0
 INVESTIGATION_CONTEXT_VERSION = "telecom-investigation-v1"
 SELECT_TOOL_NAME = "select_query"
 MAX_MCP_RESPONSE_BYTES = MAX_TOOL_RESULT_BYTES * 4
@@ -139,7 +146,8 @@ class CockroachCloudManagedMcpClient:
         cluster_id: str,
         api_key: str,
         *,
-        timeout_seconds: float = 15,
+        timeout_seconds: float = MANAGED_MCP_PHASE_TIMEOUT_SECONDS,
+        deadline_seconds: float = MANAGED_MCP_DEADLINE_SECONDS,
     ) -> None:
         try:
             self._cluster_id = str(UUID(cluster_id))
@@ -147,11 +155,14 @@ class CockroachCloudManagedMcpClient:
             raise ValueError("MCP cluster ID must be a UUID") from error
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("MCP API key cannot be empty")
-        if timeout_seconds <= 0 or timeout_seconds > 60:
+        if timeout_seconds <= 0 or timeout_seconds > MAX_MANAGED_MCP_DEADLINE_SECONDS:
             raise ValueError("MCP timeout must be between 0 and 60 seconds")
+        if not timeout_seconds <= deadline_seconds <= MAX_MANAGED_MCP_DEADLINE_SECONDS:
+            raise ValueError("MCP deadline must be between the phase timeout and 60 seconds")
         self._api_key = api_key.strip()
         self._endpoint = DEFAULT_MANAGED_MCP_ENDPOINT
         self._timeout_seconds = timeout_seconds
+        self._deadline_seconds = deadline_seconds
 
     def select(self, *, database: str, query: str) -> object:
         if not isinstance(query, str) or not query.lstrip().upper().startswith("SELECT "):
@@ -168,15 +179,27 @@ class CockroachCloudManagedMcpClient:
             )
         try:
             with current_performance_span(component="cockroach-mcp", operation="select"):
-                return asyncio.run(self._select(database, query))
+                return asyncio.run(self._select_within_deadline(database, query))
         except InvestigationContextReadError:
             raise
+        except TimeoutError as error:
+            raise InvestigationContextReadError(
+                "managed_mcp_deadline_exceeded",
+                "CockroachDB Managed MCP exceeded its request deadline",
+                retryable=True,
+            ) from error
         except Exception as error:
             raise InvestigationContextReadError(
                 "managed_mcp_request_failed",
                 "CockroachDB Managed MCP request failed",
                 retryable=True,
             ) from error
+
+    async def _select_within_deadline(self, database: str, query: str) -> object:
+        return await asyncio.wait_for(
+            self._select(database, query),
+            self._deadline_seconds,
+        )
 
     async def _select(self, database: str, query: str) -> object:
         import httpx

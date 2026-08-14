@@ -31,6 +31,7 @@ from hindsight.adapters.telecom.seed import (
 )
 from hindsight.infrastructure.database import (
     CockroachDatabasePool,
+    DatabaseCapacityError,
     DatabasePoolConfig,
     connect_database,
 )
@@ -41,6 +42,7 @@ from hindsight.infrastructure.demo_workspaces import (
     DemoWorkspaceState,
     InMemoryDemoWorkspaceRepository,
 )
+from hindsight.infrastructure.provider_budget import DEMO_WORKSPACE_LEASE_SECONDS
 from hindsight.telemetry import (
     current_performance_span,
     current_performance_trace,
@@ -75,9 +77,6 @@ MAX_EVIDENCE_ITEMS = 64
 MAX_TEXT_LENGTH = 2_048
 MAX_JSON_ITEMS = 64
 MAX_JSON_DEPTH = 4
-# Longer than the 600-second provider lease: provider calls are bounded below that
-# lease, while the workspace still needs time to serialize and persist the result.
-DEMO_WORKSPACE_LEASE_SECONDS = 660
 SENSITIVE_FIELD_MARKERS = (
     "api_key",
     "authorization",
@@ -455,6 +454,26 @@ def create_app(
                 else:
                     try:
                         response = await call_next(request)
+                    except DatabaseCapacityError:
+                        logger.error(
+                            json.dumps(
+                                {
+                                    "event": "database_capacity_unavailable",
+                                    "correlation_id": correlation_id,
+                                    "method": request.method,
+                                    "path": normalized_path,
+                                },
+                                separators=(",", ":"),
+                            )
+                        )
+                        response = JSONResponse(
+                            status_code=503,
+                            content={
+                                "detail": "database_capacity_unavailable",
+                                "correlation_id": correlation_id,
+                            },
+                            headers={"Retry-After": "5"},
+                        )
                     except Exception as error:
                         logger.error(
                             json.dumps(
@@ -636,7 +655,24 @@ def create_app(
                 else "no_reported_incident"
             )
             return JSONResponse(status_code=409, content={"detail": detail})
-        incident = claimed.payload["reported_incidents"][0]
+        incident = _reported_incident(claimed.payload)
+        if incident is None:
+            # Releasing the lease here matters more than the status code: leaving the
+            # row running would block every replica until the lease expires.
+            await run_in_threadpool(workspaces.restore, workspace_id, lease_token)
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "demo_workspace_payload_invalid",
+                        "correlation_id": correlation_id,
+                    },
+                    separators=(",", ":"),
+                )
+            )
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "no_reported_incident"},
+            )
         execution_operation = "demo-seed-provider" if demo_uses_provider else "demo-seed-execution"
         admission = await run_in_threadpool(
             admit_provider_operation,
@@ -1184,6 +1220,18 @@ def _prepared_demo_workspace(
         ],
         "past_audits": current.get("past_audits", []),
     }
+
+
+def _reported_incident(payload: dict[str, object]) -> dict[str, object] | None:
+    """Return the incident a claimed workspace can be audited against, if it has one."""
+
+    incidents = payload.get("reported_incidents")
+    if not isinstance(incidents, list) or not incidents:
+        return None
+    incident = _mapping(incidents[0])
+    if incident.get("subject_id") is None or incident.get("case_id") is None:
+        return None
+    return incident
 
 
 def _empty_workspace() -> dict[str, object]:

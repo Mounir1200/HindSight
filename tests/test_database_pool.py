@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout, TooManyRequests
 
 from hindsight.infrastructure.database import (
     DATABASE_POOL_MAX_LIFETIME_ENV,
@@ -18,6 +18,7 @@ from hindsight.infrastructure.database import (
     DEFAULT_DATABASE_POOL_TIMEOUT_SECONDS,
     VALIDATE_DATABASE_CONNECTION_SQL,
     CockroachDatabasePool,
+    DatabaseCapacityError,
     DatabasePoolConfig,
 )
 
@@ -235,6 +236,30 @@ def test_checkout_requires_open_pool_and_always_returns_the_connection() -> None
     database_pool.close()
     with pytest.raises(RuntimeError, match="is closed"), database_pool.checkout():
         pass
+
+
+@pytest.mark.parametrize("saturation", [PoolTimeout, TooManyRequests])
+def test_checkout_reports_pool_exhaustion_as_capacity_rather_than_failure(
+    saturation: type[Exception],
+) -> None:
+    """Saturation must stay distinguishable from a fault: the caller sheds the request
+    with a retryable status instead of reporting an internal error. A full waiting queue
+    raises TooManyRequests, which shares no ancestry with the checkout timeout."""
+
+    class ExhaustedConnectionPool(FakeConnectionPool):
+        def connection(self, *, timeout: float) -> FakeCheckout:
+            raise saturation("pool exhausted")
+
+    database_pool = CockroachDatabasePool(
+        "postgresql://configured",
+        pool_factory=lambda **arguments: ExhaustedConnectionPool(**arguments),
+    )
+    database_pool.open()
+
+    with pytest.raises(DatabaseCapacityError) as error, database_pool.checkout():
+        pass
+
+    assert isinstance(error.value.__cause__, saturation)
 
 
 def test_validate_executes_one_bounded_health_query() -> None:

@@ -18,6 +18,10 @@ from hindsight.core.rate_limits import (
     RateLimitStore,
     RateLimitStoreError,
 )
+from hindsight.infrastructure.provider_budget import (
+    DEMO_WORKSPACE_EXCLUSIVE_LEASE_TTL_SECONDS,
+    PROVIDER_LEASE_TTL_SECONDS,
+)
 from hindsight.infrastructure.rate_limits import (
     CockroachTokenBucketStore,
     InMemoryTokenBucketStore,
@@ -375,13 +379,13 @@ class DefaultRateLimitPolicy:
             return RateLimitLeaseRule(
                 lease_key="demo-workspace-execution",
                 slots=1,
-                ttl_seconds=720,
+                ttl_seconds=DEMO_WORKSPACE_EXCLUSIVE_LEASE_TTL_SECONDS,
             )
         if operation in {"demo-seed-provider", "memory-search-provider"}:
             return RateLimitLeaseRule(
                 lease_key="provider-concurrency",
                 slots=self._provider_concurrency,
-                ttl_seconds=600,
+                ttl_seconds=PROVIDER_LEASE_TTL_SECONDS,
             )
         return None
 
