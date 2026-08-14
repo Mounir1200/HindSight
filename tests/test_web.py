@@ -18,6 +18,23 @@ TRUTH_ID = UUID("10000000-0000-0000-0000-000000000002")
 KNOWLEDGE_ID = UUID("10000000-0000-0000-0000-000000000003")
 
 
+class _TestDatabasePool:
+    def __init__(self, checkout_context: object) -> None:
+        self._checkout_context = checkout_context
+
+    def open(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def checkout(self):
+        return self._checkout_context
+
+    def validate(self) -> None:
+        return None
+
+
 @pytest.fixture(autouse=True)
 def _disable_default_rate_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HINDSIGHT_RATE_LIMIT_ENABLED", "false")
@@ -140,6 +157,50 @@ def test_liveness_does_not_depend_on_the_database_probe() -> None:
     }
 
 
+def test_deployed_startup_readiness_gate_fails_before_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HINDSIGHT_STARTUP_READINESS_CHECK", "true")
+
+    def probe() -> None:
+        raise RuntimeError("database is not ready")
+
+    with (
+        pytest.raises(RuntimeError, match="database is not ready"),
+        TestClient(create_app(database_url="configured", health_probe=probe)),
+    ):
+        pass
+
+
+def test_configured_api_key_protects_business_routes_and_readiness_but_not_liveness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_key = "production-key-" + ("a" * 48)
+    monkeypatch.setenv("HINDSIGHT_API_KEY", api_key)
+
+    with TestClient(create_app(database_url="")) as client:
+        health = client.get("/health")
+        dashboard = client.get("/")
+        readiness = client.get("/ready")
+        rejected = client.get("/demo/workspace")
+        future_route = client.get("/future-business-route")
+        accepted = client.get(
+            "/demo/workspace",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+
+    assert health.status_code == 200
+    assert dashboard.status_code == 200
+    assert readiness.status_code == 401
+    assert rejected.status_code == 401
+    assert future_route.status_code == 401
+    assert rejected.json() == {"detail": "authentication_required"}
+    assert rejected.headers["www-authenticate"] == "Bearer"
+    assert rejected.headers["x-correlation-id"]
+    assert api_key not in rejected.text
+    assert accepted.status_code == 200
+
+
 def test_request_log_is_structured_and_does_not_record_the_query(caplog) -> None:
     with (
         caplog.at_level(logging.INFO, logger="hindsight.web"),
@@ -157,7 +218,36 @@ def test_request_log_is_structured_and_does_not_record_the_query(caplog) -> None
     assert event["path"] == "/health"
     assert event["status_code"] == 200
     assert event["duration_ms"] >= 0
+    assert datetime.fromisoformat(event["observed_at"].replace("Z", "+00:00")).tzinfo == UTC
     assert "must-not-be-logged" not in json.dumps(event)
+
+
+@pytest.mark.parametrize(
+    ("path", "normalized_path"),
+    (
+        (f"/decisions/{DECISION_ID}/truth", "/decisions/{uuid}/truth"),
+        ("/assets/private-customer", "/assets/{asset}"),
+        ("/customers/private-customer", "/{other}"),
+    ),
+)
+def test_request_log_uses_a_stable_route_without_user_segments(
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+    normalized_path: str,
+) -> None:
+    with (
+        caplog.at_level(logging.INFO, logger="hindsight.web"),
+        TestClient(create_app(database_url="")) as client,
+    ):
+        client.get(path)
+
+    event = next(
+        json.loads(record.message)
+        for record in reversed(caplog.records)
+        if '"event":"request_complete"' in record.message
+    )
+    assert event["path"] == normalized_path
+    assert "private-customer" not in json.dumps(event)
 
 
 def test_decision_api_exposes_bounded_read_only_sections() -> None:
@@ -332,13 +422,12 @@ def test_cockroach_decision_reader_uses_parameterized_bounded_queries(
             return Result([evidence_row])
 
     connection = Connection()
-    monkeypatch.setattr(
-        web_app_module,
-        "connect_database",
-        lambda _database_url: connection,
-    )
-
-    with TestClient(create_app(database_url="postgresql://configured")) as client:
+    with TestClient(
+        create_app(
+            database_url="postgresql://configured",
+            database_pool=_TestDatabasePool(connection),
+        )
+    ) as client:
         response = client.get(f"/decisions/{DECISION_ID}/evidence")
 
     assert response.status_code == 200
@@ -400,6 +489,31 @@ def test_demo_requires_one_explicit_prepared_incident(caplog) -> None:
         "agent_run_ids": [str(billing_run_id)],
         "agent_correlation_id": str(agent_correlation_id),
     }
+
+
+def test_demo_returns_a_bounded_correlated_performance_trace() -> None:
+    with TestClient(create_app(database_url="", demo_runner=lambda: _demo_payload())) as client:
+        client.post("/demo/prepare")
+        response = client.post("/demo/seed")
+
+    assert response.status_code == 200
+    correlation_id = response.headers["x-correlation-id"]
+    trace = response.json()["performance_trace"]
+    assert trace == [
+        {
+            "event": "performance_span",
+            "correlation_id": correlation_id,
+            "component": "workflow",
+            "operation": "demo.execute",
+            "duration_ms": trace[0]["duration_ms"],
+            "observed_at": trace[0]["observed_at"],
+            "outcome": "success",
+            "error_type": None,
+        }
+    ]
+    assert isinstance(trace[0]["duration_ms"], int | float)
+    assert trace[0]["duration_ms"] >= 0
+    assert datetime.fromisoformat(trace[0]["observed_at"].replace("Z", "+00:00")).tzinfo == UTC
 
 
 def test_workspace_moves_both_audited_cases_to_history() -> None:
@@ -678,16 +792,12 @@ def test_cockroach_demo_reset_uses_one_bounded_parameterized_transaction(
 
     connection = Connection()
     monkeypatch.setenv("HINDSIGHT_DEMO_RESET_TOKEN", token)
-    monkeypatch.setattr(
-        web_app_module,
-        "connect_database",
-        lambda _database_url: connection,
-    )
-
     with TestClient(
         create_app(
             database_url="postgresql://configured",
             demo_runner=lambda: _demo_payload(),
+            database_pool=_TestDatabasePool(connection),
+            workspace_repository=web_app_module.InMemoryDemoWorkspaceRepository(),
         )
     ) as client:
         response = client.post(

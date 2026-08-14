@@ -1,37 +1,47 @@
-from typing import cast
+from collections.abc import Callable
+from contextlib import AbstractContextManager
+from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 
 from hindsight.adapters.telecom.remediation import InMemoryTelecomRemediationRepository
 from hindsight.agents.advisory import BedrockAdvisoryClient
 from hindsight.agents.investigation import InvestigationAgent
-from hindsight.core.agents.repository import InMemoryAgentRunRepository
-from hindsight.core.assertions.repository import (
-    CockroachAssertionRepository,
-    InMemoryAssertionRepository,
-)
-from hindsight.core.decisions.repository import (
-    CockroachDecisionRepository,
-    InMemoryDecisionRepository,
-)
+from hindsight.core.agents.repository import AgentRunRepository, InMemoryAgentRunRepository
+from hindsight.core.assertions.repository import InMemoryAssertionRepository
+from hindsight.core.decisions.repository import InMemoryDecisionRepository
 from hindsight.core.memory import SemanticProceduralMemory
 from hindsight.demo import run_demo_workflow
-from hindsight.infrastructure.agent_runs import CockroachAgentRunRepository
 from hindsight.infrastructure.bedrock import BedrockConverseClient
-from hindsight.infrastructure.database import connect_database
+from hindsight.infrastructure.database import CockroachDatabasePool, DatabasePoolConfig
 from hindsight.infrastructure.embeddings import (
     DEFAULT_EMBEDDING_MODEL_ID,
     BedrockTitanTextEmbedder,
 )
 from hindsight.infrastructure.managed_mcp import (
     CockroachCloudManagedMcpClient,
-    CockroachInvestigationContextStore,
+    InvestigationContextSnapshot,
     ManagedMcpInvestigationContextReader,
     database_name_from_url,
 )
-from hindsight.infrastructure.telecom_remediation import (
-    CockroachTelecomRemediationRepository,
+from hindsight.infrastructure.pooled_repositories import (
+    PooledAgentRunRepository,
+    PooledAssertionRepository,
+    PooledDecisionRepository,
+    PooledInvestigationContextStore,
+    PooledTelecomRemediationRepository,
+    PooledTelecomVectorMemoryStore,
 )
-from hindsight.infrastructure.vector_memory import CockroachTelecomVectorMemoryStore
+from hindsight.telemetry import current_correlation_id
+
+ConnectionCheckout = Callable[[], AbstractContextManager[Any]]
+
+
+class InvestigationContextStore(Protocol):
+    def persist(
+        self,
+        case_id: UUID,
+        context: dict[str, object],
+    ) -> InvestigationContextSnapshot: ...
 
 
 def execute_demo(
@@ -43,46 +53,48 @@ def execute_demo(
     aws_region: str | None = None,
     mcp_cluster_id: str | None = None,
     mcp_api_key: str | None = None,
+    connection_context_factory: ConnectionCheckout | None = None,
 ) -> dict[str, object]:
-    connection = connect_database(database_url) if database_url else None
-    correlation_id = uuid4()
+    owned_pool = None
+    checkout = connection_context_factory
+    if database_url is not None and checkout is None:
+        owned_pool = CockroachDatabasePool(
+            database_url,
+            config=DatabasePoolConfig.from_environment(),
+        )
+        owned_pool.open()
+        checkout = owned_pool.checkout
+    correlation_id = current_correlation_id() or uuid4()
     try:
-        if connection is None:
+        if database_url is None:
             assertion_repository = InMemoryAssertionRepository()
             decision_repository = InMemoryDecisionRepository()
             remediation_repository = InMemoryTelecomRemediationRepository()
             agent_run_repository = InMemoryAgentRunRepository()
             backend = "in_memory"
         else:
-            assertion_repository = CockroachAssertionRepository(connection)
-            decision_repository = CockroachDecisionRepository(connection)
-            remediation_repository = CockroachTelecomRemediationRepository(
-                connection,
-                connection_factory=lambda: connect_database(database_url),
-            )
-            agent_run_repository = CockroachAgentRunRepository(
-                connection,
-                connection_factory=lambda: connect_database(database_url),
-            )
+            if checkout is None:
+                raise RuntimeError("CockroachDB checkout was not configured")
+            assertion_repository = PooledAssertionRepository(checkout)
+            decision_repository = PooledDecisionRepository(checkout)
+            remediation_repository = PooledTelecomRemediationRepository(checkout)
+            agent_run_repository = PooledAgentRunRepository(checkout)
             backend = "cockroachdb"
 
         bedrock_client = None
         advisory_client = None
         if bedrock_model_id:
-            if connection is None:
+            if database_url is None:
                 raise ValueError("Bedrock agents require CockroachDB for durable traces")
             bedrock_client = BedrockConverseClient(bedrock_model_id, aws_region)
             advisory_client = BedrockAdvisoryClient(bedrock_client)
 
         vector_memory = None
         if vector_enabled:
-            if connection is None or database_url is None:
+            if database_url is None or checkout is None:
                 raise ValueError("vector memory requires CockroachDB")
             vector_memory = SemanticProceduralMemory(
-                CockroachTelecomVectorMemoryStore(
-                    connection,
-                    connection_factory=lambda: connect_database(database_url),
-                ),
+                PooledTelecomVectorMemoryStore(checkout),
                 BedrockTitanTextEmbedder(embedding_model_id, aws_region),
                 remediation_repository,
             )
@@ -99,14 +111,14 @@ def execute_demo(
             correlation_id=correlation_id,
         )
         if bedrock_model_id:
-            if connection is None or database_url is None or bedrock_client is None:
+            if database_url is None or checkout is None or bedrock_client is None:
                 raise ValueError("Bedrock investigation requires CockroachDB")
             context_store = None
             context_reader = None
             if mcp_cluster_id is not None:
                 if mcp_api_key is None:
                     raise ValueError("Managed MCP requires an API key")
-                context_store = CockroachInvestigationContextStore(connection)
+                context_store = PooledInvestigationContextStore(checkout)
                 context_reader = ManagedMcpInvestigationContextReader(
                     CockroachCloudManagedMcpClient(mcp_cluster_id, mcp_api_key),
                     database_name_from_url(database_url),
@@ -121,17 +133,17 @@ def execute_demo(
             )
         return payload
     finally:
-        if connection is not None:
-            connection.close()
+        if owned_pool is not None:
+            owned_pool.close()
 
 
 def _add_bedrock_investigation(
     payload: dict[str, object],
-    repository: CockroachAgentRunRepository,
+    repository: AgentRunRepository,
     client: BedrockConverseClient,
     correlation_id: UUID,
     *,
-    context_store: CockroachInvestigationContextStore | None = None,
+    context_store: InvestigationContextStore | None = None,
     context_reader: ManagedMcpInvestigationContextReader | None = None,
 ) -> None:
     learning = cast(dict[str, object], payload["learning_proof"])

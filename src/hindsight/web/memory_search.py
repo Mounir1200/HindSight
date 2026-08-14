@@ -1,9 +1,8 @@
-import json
-import logging
 import os
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Annotated, Any, Protocol
 from uuid import UUID
@@ -14,12 +13,15 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from hindsight.core.memory import (
+    DEFAULT_MIN_MEMORY_SIMILARITY,
+    MEMORY_EMBEDDING_DIMENSIONS,
     ProceduralMemoryHit,
     ProceduralMemoryLookup,
     ProceduralMemoryReader,
     ProceduralMemoryRetrieval,
-    SemanticProceduralMemory,
     TextEmbedder,
+    TextEmbedding,
+    memory_lookup_document,
 )
 from hindsight.infrastructure.database import connect_database
 from hindsight.infrastructure.embeddings import (
@@ -30,7 +32,13 @@ from hindsight.infrastructure.telecom_remediation import (
     CockroachTelecomRemediationRepository,
 )
 from hindsight.infrastructure.vector_memory import CockroachTelecomVectorMemoryStore
-from hindsight.web.rate_limit import RateLimiter, RateLimitUnavailableError
+from hindsight.telemetry import current_performance_span
+from hindsight.web.provider_admission import (
+    admit_provider_operation,
+    provider_admission_response,
+    release_provider_lease,
+)
+from hindsight.web.rate_limit import RateLimiter
 
 MAX_AGENT_ID_LENGTH = 64
 MAX_ROUTE_LENGTH = 128
@@ -55,7 +63,6 @@ _QUERY_FIELDS = frozenset(
         "limit",
     }
 )
-logger = logging.getLogger("hindsight.web")
 
 
 def _validate_server_text(value: str, field: str, max_length: int) -> None:
@@ -150,12 +157,18 @@ class MemorySearchRuntimeConfig:
             aws_region=_optional(values, "AWS_REGION"),
         )
 
-    def reader(self, database_url: str) -> "CockroachMemorySearchReader":
+    def reader(
+        self,
+        database_url: str,
+        *,
+        connection_context_factory: Callable[[], AbstractContextManager[Any]] | None = None,
+    ) -> "CockroachMemorySearchReader":
         return CockroachMemorySearchReader(
             database_url,
             vector_enabled=self.vector_enabled,
             embedding_model_id=self.embedding_model_id,
             aws_region=self.aws_region,
+            connection_context_factory=connection_context_factory,
         )
 
 
@@ -168,6 +181,7 @@ class CockroachMemorySearchReader:
         embedding_model_id: str = DEFAULT_EMBEDDING_MODEL_ID,
         aws_region: str | None = None,
         connection_factory: Callable[[], Any] | None = None,
+        connection_context_factory: Callable[[], AbstractContextManager[Any]] | None = None,
         embedder_factory: Callable[[], TextEmbedder] | None = None,
     ) -> None:
         if not isinstance(database_url, str) or not database_url.strip():
@@ -180,12 +194,15 @@ class CockroachMemorySearchReader:
             raise ValueError("aws_region cannot be empty")
         if embedder_factory is not None and not vector_enabled:
             raise ValueError("embedder_factory requires vector_enabled")
+        if connection_factory is not None and connection_context_factory is not None:
+            raise ValueError("configure only one database connection factory")
 
         self._database_url = database_url
         self._vector_enabled = vector_enabled
         self._connection_factory = connection_factory or (
             lambda: connect_database(self._database_url)
         )
+        self._connection_context_factory = connection_context_factory
         self._embedder = None
         if vector_enabled:
             self._embedder = (
@@ -199,21 +216,46 @@ class CockroachMemorySearchReader:
         return self._vector_enabled
 
     def retrieve(self, lookup: ProceduralMemoryLookup) -> ProceduralMemoryRetrieval:
-        connection = self._connection_factory()
-        try:
-            fallback = CockroachTelecomRemediationRepository(connection)
-            if not self._vector_enabled:
-                return fallback.retrieve(lookup)
-
+        embedding = None
+        if self._vector_enabled:
             if self._embedder is None:
                 raise RuntimeError("vector search is not initialized")
-            return SemanticProceduralMemory(
-                CockroachTelecomVectorMemoryStore(connection),
-                self._embedder,
-                fallback,
-            ).retrieve(lookup)
+            # Provider latency happens before the database checkout so a slow
+            # embedding call never consumes a bounded CockroachDB connection.
+            embedding = self._embedder.embed(memory_lookup_document(lookup))
+            if (
+                embedding.model_id != self._embedder.model_id
+                or len(embedding.values) != MEMORY_EMBEDDING_DIMENSIONS
+            ):
+                raise ValueError("embedder returned an incompatible embedding")
+        if self._connection_context_factory is not None:
+            with self._connection_context_factory() as connection:
+                return self._retrieve_with_connection(connection, lookup, embedding)
+        connection = self._connection_factory()
+        try:
+            return self._retrieve_with_connection(connection, lookup, embedding)
         finally:
             connection.close()
+
+    def _retrieve_with_connection(
+        self,
+        connection: Any,
+        lookup: ProceduralMemoryLookup,
+        embedding: TextEmbedding | None,
+    ) -> ProceduralMemoryRetrieval:
+        fallback = CockroachTelecomRemediationRepository(connection)
+        if not self._vector_enabled:
+            return fallback.retrieve(lookup)
+
+        if embedding is None:
+            raise RuntimeError("vector search embedding is unavailable")
+        retrieval = CockroachTelecomVectorMemoryStore(connection).retrieve(lookup, embedding)
+        hits = tuple(
+            hit
+            for hit in retrieval.hits
+            if hit.score is not None and hit.score >= DEFAULT_MIN_MEMORY_SIMILARITY
+        )
+        return replace(retrieval, hits=hits) if hits else fallback.retrieve(lookup)
 
 
 class UnavailableMemorySearchReader:
@@ -224,11 +266,16 @@ class UnavailableMemorySearchReader:
 def build_memory_search_reader(
     database_url: str | None,
     environment: Mapping[str, str] | None = None,
+    *,
+    connection_context_factory: Callable[[], AbstractContextManager[Any]] | None = None,
 ) -> ProceduralMemoryReader:
     config = MemorySearchRuntimeConfig.from_environment(environment)
     if database_url is None or not database_url.strip():
         return UnavailableMemorySearchReader()
-    return config.reader(database_url)
+    return config.reader(
+        database_url,
+        connection_context_factory=connection_context_factory,
+    )
 
 
 def create_memory_search_router(
@@ -281,140 +328,34 @@ def create_memory_search_router(
         except ValueError as error:
             raise HTTPException(status_code=422, detail="invalid_memory_search") from error
 
-        provider_lease = None
+        correlation_id = getattr(request.state, "correlation_id", "")
         provider_limited = rate_limiter is not None and bool(
             getattr(reader, "vector_enabled", False)
         )
+        admission = None
         if provider_limited and rate_limiter is not None:
-            try:
-                lease_decision = await run_in_threadpool(
-                    rate_limiter.acquire_operation_lease,
-                    "memory-search-provider",
-                )
-            except RateLimitUnavailableError:
-                correlation_id = getattr(request.state, "correlation_id", "")
-                logger.error(
-                    json.dumps(
-                        {
-                            "event": "rate_limit_unavailable",
-                            "correlation_id": correlation_id,
-                            "operation": "provider-concurrency",
-                        },
-                        separators=(",", ":"),
-                    )
-                )
-                return JSONResponse(
-                    status_code=503,
-                    content={
-                        "detail": "rate_limit_unavailable",
-                        "correlation_id": correlation_id,
-                    },
-                    headers={"Cache-Control": "no-store"},
-                )
-            if lease_decision is not None and not lease_decision.acquired:
-                logger.warning(
-                    json.dumps(
-                        {
-                            "event": "rate_limit_rejected",
-                            "correlation_id": getattr(
-                                request.state,
-                                "correlation_id",
-                                "",
-                            ),
-                            "operation": "provider-concurrency",
-                            "policy": lease_decision.policy_id,
-                        },
-                        separators=(",", ":"),
-                    )
-                )
-                return JSONResponse(
-                    status_code=429,
-                    content={"detail": "rate_limit_exceeded"},
-                    headers={
-                        **lease_decision.headers,
-                        "Cache-Control": "no-store",
-                    },
-                )
-            provider_lease = lease_decision.lease if lease_decision is not None else None
+            admission = await run_in_threadpool(
+                admit_provider_operation,
+                rate_limiter,
+                "memory-search-provider",
+                getattr(request.state, "rate_limit_principal", "global"),
+            )
+            if not admission.granted:
+                return provider_admission_response(admission, correlation_id)
 
         try:
-            if provider_limited and rate_limiter is not None:
-                principal = getattr(request.state, "rate_limit_principal", "global")
-                try:
-                    provider_limit = await run_in_threadpool(
-                        rate_limiter.check_operation,
-                        "memory-search-provider",
-                        principal,
-                    )
-                except RateLimitUnavailableError:
-                    correlation_id = getattr(request.state, "correlation_id", "")
-                    logger.error(
-                        json.dumps(
-                            {
-                                "event": "rate_limit_unavailable",
-                                "correlation_id": correlation_id,
-                                "operation": "memory-search-provider",
-                            },
-                            separators=(",", ":"),
-                        )
-                    )
-                    return JSONResponse(
-                        status_code=503,
-                        content={
-                            "detail": "rate_limit_unavailable",
-                            "correlation_id": correlation_id,
-                        },
-                        headers={"Cache-Control": "no-store"},
-                    )
-                if provider_limit is not None and not provider_limit.allowed:
-                    logger.warning(
-                        json.dumps(
-                            {
-                                "event": "rate_limit_rejected",
-                                "correlation_id": getattr(
-                                    request.state,
-                                    "correlation_id",
-                                    "",
-                                ),
-                                "operation": "memory-search-provider",
-                                "policy": provider_limit.policy_id,
-                            },
-                            separators=(",", ":"),
-                        )
-                    )
-                    return JSONResponse(
-                        status_code=429,
-                        content={"detail": "rate_limit_exceeded"},
-                        headers={
-                            **provider_limit.headers,
-                            "Cache-Control": "no-store",
-                        },
-                    )
-            retrieval = await run_in_threadpool(reader.retrieve, lookup)
+            with current_performance_span(component="memory", operation="retrieve"):
+                retrieval = await run_in_threadpool(reader.retrieve, lookup)
         except Exception as error:
             raise HTTPException(status_code=503, detail="memory_search_unavailable") from error
         finally:
-            if provider_limited and rate_limiter is not None and provider_lease is not None:
-                try:
-                    await run_in_threadpool(
-                        rate_limiter.release_operation_lease,
-                        provider_lease,
-                    )
-                except RateLimitUnavailableError:
-                    logger.error(
-                        json.dumps(
-                            {
-                                "event": "rate_limit_lease_release_failed",
-                                "correlation_id": getattr(
-                                    request.state,
-                                    "correlation_id",
-                                    "",
-                                ),
-                                "operation": "provider-concurrency",
-                            },
-                            separators=(",", ":"),
-                        )
-                    )
+            if admission is not None and rate_limiter is not None:
+                await run_in_threadpool(
+                    release_provider_lease,
+                    rate_limiter,
+                    admission.lease,
+                    correlation_id,
+                )
 
         payload = _response_payload(validated_agent_id, scope, retrieval, limit)
         return JSONResponse(

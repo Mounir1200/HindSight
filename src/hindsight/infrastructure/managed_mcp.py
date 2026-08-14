@@ -14,6 +14,7 @@ from hindsight.agents.investigation import (
     InvestigationContextReadError,
     prepare_investigation_context,
 )
+from hindsight.telemetry import current_performance_span
 
 DEFAULT_MANAGED_MCP_ENDPOINT = "https://cockroachlabs.cloud/mcp"
 INVESTIGATION_CONTEXT_VERSION = "telecom-investigation-v1"
@@ -166,7 +167,8 @@ class CockroachCloudManagedMcpClient:
                 retryable=False,
             )
         try:
-            return asyncio.run(self._select(database, query))
+            with current_performance_span(component="cockroach-mcp", operation="select"):
+                return asyncio.run(self._select(database, query))
         except InvestigationContextReadError:
             raise
         except Exception as error:

@@ -27,6 +27,12 @@ _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"0", "false", "no", "off", ""})
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _MAX_FORWARDED_HOPS = 8
+_RATE_LIMIT_POOL_MAX_SIZE_ENV = "HINDSIGHT_RATE_LIMIT_POOL_MAX_SIZE"
+_DEFAULT_RATE_LIMIT_POOL_MAX_SIZE = 5
+_MAX_RATE_LIMIT_POOL_MAX_SIZE = 20
+_PROVIDER_CONCURRENCY_ENV = "HINDSIGHT_PROVIDER_CONCURRENCY"
+_DEFAULT_PROVIDER_CONCURRENCY = 4
+_MAX_PROVIDER_CONCURRENCY = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +45,7 @@ class RateLimitConfig:
     scale: Decimal
     max_local_buckets: int = 50_000
     trust_app_runner_xff: bool = False
+    provider_concurrency: int = _DEFAULT_PROVIDER_CONCURRENCY
 
     @classmethod
     def from_environment(
@@ -118,6 +125,19 @@ class RateLimitConfig:
                 "HINDSIGHT_RATE_LIMIT_MAX_LOCAL_BUCKETS must be between 1000 and 1000000"
             )
 
+        raw_provider_concurrency = values.get(
+            _PROVIDER_CONCURRENCY_ENV,
+            str(_DEFAULT_PROVIDER_CONCURRENCY),
+        )
+        try:
+            provider_concurrency = int(raw_provider_concurrency.strip())
+        except (AttributeError, ValueError) as error:
+            raise ValueError(f"{_PROVIDER_CONCURRENCY_ENV} must be an integer") from error
+        if not 1 <= provider_concurrency <= _MAX_PROVIDER_CONCURRENCY:
+            raise ValueError(
+                f"{_PROVIDER_CONCURRENCY_ENV} must be between 1 and {_MAX_PROVIDER_CONCURRENCY}"
+            )
+
         return cls(
             enabled=enabled,
             backend=backend,
@@ -127,6 +147,7 @@ class RateLimitConfig:
             scale=scale,
             max_local_buckets=max_local_buckets,
             trust_app_runner_xff=trust_app_runner_xff,
+            provider_concurrency=provider_concurrency,
         )
 
 
@@ -201,30 +222,38 @@ class RateLimitPolicy(Protocol):
 
 
 class DefaultRateLimitPolicy:
-    def __init__(self, scale: Decimal = Decimal(1)) -> None:
+    def __init__(
+        self,
+        scale: Decimal = Decimal(1),
+        provider_concurrency: int = _DEFAULT_PROVIDER_CONCURRENCY,
+    ) -> None:
+        if not 1 <= provider_concurrency <= _MAX_PROVIDER_CONCURRENCY:
+            raise ValueError(
+                f"provider_concurrency must be between 1 and {_MAX_PROVIDER_CONCURRENCY}"
+            )
         self._scale = scale
+        self._provider_concurrency = provider_concurrency
 
     def rules(self, method: str, path: str) -> tuple[RateLimitRule, ...]:
         normalized_method = method.upper()
         normalized_path = _normalized_path(path)
         if normalized_path == "/health":
-            return (
-                self._rule(
-                    "health-local",
-                    120,
-                    60,
-                    20,
-                    shared=False,
-                ),
-            )
+            # The load-balancer probe must never be throttled. It carries no
+            # forwarded address, so it shares a principal with any request whose
+            # X-Forwarded-For cannot be resolved; a shared bucket would let that
+            # traffic starve the probe and deregister the task. The edge rate
+            # rules remain the ceiling for this static response.
+            return ()
         if normalized_path == "/ready":
+            # Client-scoped rather than global: readiness drives a database probe,
+            # so it stays bounded per caller, but no caller can exhaust the budget
+            # that an operator or platform prober depends on.
             return (
                 self._rule(
-                    "readiness-local",
+                    "readiness-client",
                     60,
                     60,
-                    5,
-                    scope="global",
+                    30,
                     shared=False,
                 ),
             )
@@ -342,10 +371,16 @@ class DefaultRateLimitPolicy:
         return ()
 
     def lease_rule(self, operation: str) -> RateLimitLeaseRule | None:
+        if operation in {"demo-workspace-exclusive", "demo-reset-authorized"}:
+            return RateLimitLeaseRule(
+                lease_key="demo-workspace-execution",
+                slots=1,
+                ttl_seconds=720,
+            )
         if operation in {"demo-seed-provider", "memory-search-provider"}:
             return RateLimitLeaseRule(
                 lease_key="provider-concurrency",
-                slots=4,
+                slots=self._provider_concurrency,
                 ttl_seconds=600,
             )
         return None
@@ -387,7 +422,10 @@ class RateLimiter:
         self._config = config
         self._local_store = local_store
         self._shared_store = shared_store
-        self._policy = policy or DefaultRateLimitPolicy(config.scale)
+        self._policy = policy or DefaultRateLimitPolicy(
+            config.scale,
+            config.provider_concurrency,
+        )
         self._clock = clock
 
     def open(self) -> None:
@@ -574,14 +612,34 @@ def build_rate_limiter(
     *,
     environment: Mapping[str, str] | None = None,
 ) -> RateLimiter:
-    config = RateLimitConfig.from_environment(database_url, environment)
+    values = environment if environment is not None else os.environ
+    config = RateLimitConfig.from_environment(database_url, values)
     local = InMemoryTokenBucketStore(max_buckets=config.max_local_buckets)
     shared: RateLimitStore | None = None
     if config.enabled and config.backend == "cockroach":
         if database_url is None:
             raise ValueError("Cockroach rate limiting requires DATABASE_URL")
-        shared = CockroachTokenBucketStore(database_url)
+        shared = CockroachTokenBucketStore(
+            database_url,
+            max_pool_size=_rate_limit_pool_max_size(values),
+        )
     return RateLimiter(config, local, shared_store=shared)
+
+
+def _rate_limit_pool_max_size(environment: Mapping[str, str]) -> int:
+    raw_value = environment.get(
+        _RATE_LIMIT_POOL_MAX_SIZE_ENV,
+        str(_DEFAULT_RATE_LIMIT_POOL_MAX_SIZE),
+    )
+    try:
+        value = int(raw_value.strip())
+    except (AttributeError, ValueError) as error:
+        raise ValueError(f"{_RATE_LIMIT_POOL_MAX_SIZE_ENV} must be an integer") from error
+    if not 1 <= value <= _MAX_RATE_LIMIT_POOL_MAX_SIZE:
+        raise ValueError(
+            f"{_RATE_LIMIT_POOL_MAX_SIZE_ENV} must be between 1 and {_MAX_RATE_LIMIT_POOL_MAX_SIZE}"
+        )
+    return value
 
 
 def client_principal(

@@ -18,6 +18,7 @@ from hindsight.core.rate_limits import (
     TokenBucketState,
     evaluate_buckets,
 )
+from hindsight.telemetry import current_performance_span
 
 INSERT_BUCKET_SQL = """
 INSERT INTO api_rate_limit_buckets (
@@ -250,6 +251,10 @@ class CockroachTokenBucketStore:
         for attempt in range(self._max_retries + 1):
             try:
                 with (
+                    current_performance_span(
+                        component="cockroach",
+                        operation="rate-limit.release-lease",
+                    ),
                     self._pool.connection(timeout=self._pool_timeout_seconds) as connection,
                     connection.transaction(),
                 ):
@@ -274,6 +279,10 @@ class CockroachTokenBucketStore:
     ) -> tuple[RateLimitResult, ...]:
         states: list[TokenBucketState] = []
         with (
+            current_performance_span(
+                component="cockroach",
+                operation="rate-limit.consume",
+            ),
             self._pool.connection(timeout=self._pool_timeout_seconds) as connection,
             connection.transaction(),
         ):
@@ -330,6 +339,10 @@ class CockroachTokenBucketStore:
         ttl_seconds: int,
     ) -> RateLimitLease | None:
         with (
+            current_performance_span(
+                component="cockroach",
+                operation="rate-limit.acquire-lease",
+            ),
             self._pool.connection(timeout=self._pool_timeout_seconds) as connection,
             connection.transaction(),
         ):

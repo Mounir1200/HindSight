@@ -109,6 +109,11 @@ def main(argv: list[str] | None = None) -> int:
             "level": log_level,
             "propagate": False,
         }
+        log_config["loggers"]["hindsight.performance"] = {
+            "handlers": ["hindsight"],
+            "level": log_level,
+            "propagate": False,
+        }
         uvicorn.run(
             "hindsight.web.app:create_app",
             factory=True,
@@ -117,6 +122,30 @@ def main(argv: list[str] | None = None) -> int:
             access_log=False,
             log_config=log_config,
             proxy_headers=False,
+            limit_concurrency=_environment_int(
+                "HINDSIGHT_SERVER_LIMIT_CONCURRENCY",
+                default=256,
+                minimum=16,
+                maximum=4_096,
+            ),
+            backlog=_environment_int(
+                "HINDSIGHT_SERVER_BACKLOG",
+                default=512,
+                minimum=64,
+                maximum=8_192,
+            ),
+            timeout_keep_alive=_environment_int(
+                "HINDSIGHT_SERVER_KEEP_ALIVE_SECONDS",
+                default=5,
+                minimum=1,
+                maximum=30,
+            ),
+            timeout_graceful_shutdown=_environment_int(
+                "HINDSIGHT_SERVER_GRACEFUL_SHUTDOWN_SECONDS",
+                default=120,
+                minimum=5,
+                maximum=120,
+            ),
         )
         return 0
 
@@ -165,6 +194,23 @@ def _port(value: str) -> int:
     if not 1 <= port <= 65_535:
         raise argparse.ArgumentTypeError("port must be between 1 and 65535")
     return port
+
+
+def _environment_int(
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw_value = os.getenv(name, str(default))
+    try:
+        value = int(raw_value.strip())
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
 
 
 def _json_default(value: Any) -> str:

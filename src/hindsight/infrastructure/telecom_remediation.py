@@ -27,6 +27,11 @@ from hindsight.core.memory import (
     ProceduralMemoryRetrieval,
 )
 
+
+class RemediationAmbiguousCommitError(RemediationStateError):
+    """The remediation commit outcome must be checked on a fresh connection."""
+
+
 INSERT_CDR_SQL = """
 INSERT INTO telecom_cdrs (
   id, external_id, msisdn_hash, route, service_type, started_at,
@@ -327,7 +332,7 @@ class CockroachTelecomRemediationRepository:
             except Exception as error:
                 if getattr(error, "sqlstate", None) != "40003":
                     raise
-                return self._recover_ambiguous_commit(plan)
+                return self._recover_ambiguous_commit(plan, error)
 
     def _apply_once(self, plan: TelecomRemediationPlan) -> RemediationReceipt:
         request = serialize_remediation_request(plan)
@@ -584,11 +589,12 @@ class CockroachTelecomRemediationRepository:
     def _recover_ambiguous_commit(
         self,
         plan: TelecomRemediationPlan,
+        cause: Exception,
     ) -> RemediationReceipt:
         if self._connection_factory is None:
-            raise RemediationStateError(
+            raise RemediationAmbiguousCommitError(
                 "commit outcome is unknown; replay the remediation with a fresh connection"
-            )
+            ) from cause
         with self._connection_factory() as connection:
             repository = CockroachTelecomRemediationRepository(
                 connection,

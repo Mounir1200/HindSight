@@ -2,7 +2,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from hindsight.telemetry import current_performance_span
+
 MAX_OUTPUT_TOKENS = 1_200
+CONNECT_TIMEOUT_SECONDS = 5
+READ_TIMEOUT_SECONDS = 30
+TOTAL_MAX_ATTEMPTS = 2
+MAX_RETRY_BACKOFF_SECONDS = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +40,11 @@ class BedrockConverseClient:
                 raise RuntimeError(
                     "boto3 is required when no Bedrock Runtime client is injected"
                 ) from error
-            client = boto3.client("bedrock-runtime", region_name=region_name)
+            client = boto3.client(
+                "bedrock-runtime",
+                region_name=region_name,
+                config=bedrock_client_config(),
+            )
 
         self._model_id = model_id
         self._client = client
@@ -68,8 +78,30 @@ class BedrockConverseClient:
         }
         if tool_config is not None:
             request["toolConfig"] = tool_config
-        response = self._client.converse(**request)
+        with current_performance_span(component="bedrock", operation="converse"):
+            response = self._client.converse(**request)
         return _parse_response(response)
+
+
+def bedrock_client_config(
+    read_timeout_seconds: int = READ_TIMEOUT_SECONDS,
+) -> Any:
+    """Bound how long one Bedrock call can run.
+
+    botocore defaults to a 60 second read timeout with several retries, so an
+    unconfigured client can occupy a provider concurrency slot for minutes.
+    ``total_max_attempts`` includes the initial request and is deliberately used
+    instead of the ambiguous ``max_attempts`` setting, whose meaning differs
+    between botocore configuration surfaces. The concurrency lease TTL must stay
+    above the worst case including retry backoff and an operational margin.
+    """
+    from botocore.config import Config
+
+    return Config(
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        read_timeout=read_timeout_seconds,
+        retries={"mode": "standard", "total_max_attempts": TOTAL_MAX_ATTEMPTS},
+    )
 
 
 def _validate_request(

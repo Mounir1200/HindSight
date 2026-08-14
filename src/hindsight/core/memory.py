@@ -222,7 +222,7 @@ class SemanticProceduralMemory(ProceduralMemoryReader, ProceduralMemoryIndexer):
         self,
         lookup: ProceduralMemoryLookup,
     ) -> ProceduralMemoryRetrieval:
-        embedding = self._embed(_lookup_document(lookup))
+        embedding = self._embed(memory_lookup_document(lookup))
         retrieval = self._store.retrieve(lookup, embedding)
         hits = tuple(
             hit
@@ -253,7 +253,9 @@ def _memory_document(source: MemoryEmbeddingSource) -> str:
     )
 
 
-def _lookup_document(lookup: ProceduralMemoryLookup) -> str:
+def memory_lookup_document(lookup: ProceduralMemoryLookup) -> str:
+    """Build the stable provider input for a procedural-memory lookup."""
+
     return "\n".join(
         (
             f"Domain: {lookup.domain}",

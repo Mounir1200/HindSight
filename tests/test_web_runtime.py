@@ -1,5 +1,6 @@
 import pytest
 
+import hindsight.web.runtime as runtime_module
 from hindsight.web.runtime import DemoRuntimeConfig
 
 
@@ -34,6 +35,25 @@ def test_runtime_maps_explicit_live_integrations() -> None:
     assert config.aws_region == "eu-central-1"
     assert config.mcp_cluster_id == "cluster-id"
     assert config.mcp_api_key == "secret"
+
+
+def test_runtime_passes_the_shared_database_checkout_to_the_demo(monkeypatch) -> None:
+    checkout = object()
+    received: dict[str, object] = {}
+
+    def execute_demo(database_url: str | None, **options: object) -> dict[str, object]:
+        received["database_url"] = database_url
+        received.update(options)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(runtime_module, "execute_demo", execute_demo)
+    config = DemoRuntimeConfig.from_environment("postgresql://runtime", {})
+
+    result = config.runner(checkout)()
+
+    assert result == {"status": "ok"}
+    assert received["database_url"] == "postgresql://runtime"
+    assert received["connection_context_factory"] is checkout
 
 
 @pytest.mark.parametrize(

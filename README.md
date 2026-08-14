@@ -39,13 +39,20 @@ workflow, and deployable AWS boundaries for the web application and ingestion:
   and one responsive dashboard that renders the decision, temporal timelines, evidence,
   remediation, and before/after memory proof;
 - a non-root Python 3.12 container selected for an ECR-to-ECS Express Mode deployment,
-  with a health check, bounded demo scaling, runtime secrets, and structured request logs;
+  with health/readiness checks, runtime secrets, structured request logs, and two explicit
+  cost/availability profiles;
+- CockroachDB-backed demo workspace state with versioned transitions and expiring execution
+  leases, so retries, task replacement, and multiple web replicas share one durable state machine;
+- a bounded, lazy CockroachDB business-connection pool per task with short repository checkouts,
+  a checkout timeout, and a maximum connection lifetime;
 - layered public abuse protection with AWS WAF per-IP rules, bounded local token buckets,
   CockroachDB-shared quotas, provider-cost budgets, anonymized client identities, and stable
   `429`/`503` contracts;
+- correlation IDs plus bounded request, CockroachDB, workflow, Bedrock, embedding, memory, and
+  MCP performance spans that can be reduced to a sanitized offline evidence report;
 - private, encrypted, versioned S3 tariff and CDR intakes with image-based Lambdas,
   bounded validation, SHA-256 provenance, idempotent writes, failure queues, and
-  single-worker backpressure;
+  one-worker safe defaults plus explicitly bounded concurrency;
 - a reproducible 35-scenario Knowledge-at-Decision-Time regression benchmark;
 - a bounded local/live operational preflight that never prints credential values;
 - idempotent demo data, focused tests, and a CLI proof with a safe replay.
@@ -192,9 +199,9 @@ containerized web applications.
   declared secrets.
 - **No Express Mode surcharge.** AWS charges the underlying Fargate, load-balancer, logging,
   data-transfer, and related resources rather than an additional Express Mode fee.
-- **A safe growth path.** The hackathon deployment can start with one task while the sample
-  intake state remains process-local, then scale horizontally after that state and its
-  coordination lock become durable.
+- **Explicit cost and availability profiles.** The public `showcase` profile defaults to one
+  task; the `production` profile requires multi-task capacity and application authentication.
+  Both use the same image and durable CockroachDB coordination model.
 
 The decision follows AWS's
 [App Runner availability and migration guidance](https://docs.aws.amazon.com/apprunner/latest/dg/apprunner-availability-change.html).
@@ -211,8 +218,9 @@ immutable tags and bounded image retention. `deploy/ecs-express-service.yaml` cr
 dedicated two-AZ VPC, ECS cluster, the three separate IAM roles, a generated 64-character HMAC
 secret, retained application and WAF logs, the Express Gateway service, its HTTPS load
 balancer association, managed WAF protections, per-IP and global rate rules, and 5xx/latency
-alarms. The image parameter accepts only an ECR URI pinned by `sha256` digest. The service is
-fixed at one 1-vCPU/2-GB task until the intake queue and coordination lock become durable.
+alarms plus an operations dashboard when enhanced observability is enabled. The image parameter
+accepts only an ECR URI pinned by `sha256` digest. Task capacity is parameterized: one task by
+default for a bounded-cost public showcase, or at least two for the production profile.
 
 Apply migrations separately with the schema-owner credential; the ECS task must never receive
 `MIGRATION_DATABASE_URL`. Application requests are emitted as single-line JSON on stdout for
@@ -220,6 +228,11 @@ CloudWatch collection, without bodies or query strings. Bedrock/vector/MCP integ
 explicit. When either AWS provider integration is enabled, deployment requires the exact
 comma-separated model and inference-profile ARNs; the generated task role receives only
 `bedrock:InvokeModel` and `bedrock:GetInferenceProfile` on that list.
+
+The ECS profile also enables a startup readiness gate: each replacement task must validate the
+application pool and distributed rate-limit tables before it begins serving. `/health` remains
+dependency-free for ongoing liveness so a transient database outage does not trigger a restart
+storm; authenticated `/ready` remains the explicit operational dependency probe.
 
 ### AWS deployment order
 
@@ -240,8 +253,9 @@ comma-separated model and inference-profile ARNs; the generated task role receiv
    # Pass RepositoryUri@sha256:<digest> to the service stack, never :latest.
    ```
 
-4. Run `hindsight migrate` with the separate schema-owner URL. Migration `011_rate_limits.sql`
-   and the documented runtime grants must exist before public traffic is accepted.
+4. Run `hindsight migrate` with the separate schema-owner URL. Migrations
+   `011_rate_limits.sql` and `012_demo_workspaces.sql`, plus the documented runtime grants,
+   must exist before public traffic is accepted.
 5. Deploy the service first with AWS managed WAF groups in `COUNT`, inspect the WAF log, then
    redeploy in `BLOCK` before sharing the URL:
 
@@ -253,34 +267,75 @@ comma-separated model and inference-profile ARNs; the generated task role receiv
      --parameter-overrides \
        ImageIdentifier=<repository-uri>@sha256:<digest> \
        DatabaseSecretArn=<runtime-database-secret-arn> \
-       AlertEmail=<operations-email> \
        ManagedRulesMode=COUNT
    ```
 
-6. Confirm the SNS subscription email, verify `/health`, `/ready`, CloudWatch logs, WAF `429`
-   responses, and the two alarms. Redeploy with `ManagedRulesMode=BLOCK`, then create an AWS
-   Budget with actual and forecast alerts before publishing the endpoint.
+6. Verify `/health`, `/ready`, CloudWatch logs, and WAF `429` responses. If enhanced
+   observability was explicitly enabled, also verify the dashboard and two alarms and confirm the
+   SNS subscription when an alert email was supplied. Redeploy with `ManagedRulesMode=BLOCK`,
+   then create an AWS Budget with actual and forecast alerts before publishing the endpoint.
 
 The full parameter contract and post-deployment evidence checklist live in
-`deploy/README.md`. The stack creates the ECS roles, VPC, generated HMAC key, WAF, and alarms;
-the operator supplies only the account/Region, runtime database secret, immutable image,
-alert destination, and any explicitly enabled Bedrock or MCP values.
+`deploy/README.md`. The stack creates the ECS roles, VPC, generated HMAC key, and WAF; enhanced
+observability adds alarms and a dashboard. The operator supplies the account/Region, profile and
+capacity, runtime database secret, immutable image, optional alert destination, the production
+application-key secret when applicable, and any explicitly enabled Bedrock or MCP values.
 
-These are deployment artifacts, not evidence that this checkout is already public. A successful
-ECR push, CloudFormation deployment, public health check, and CloudWatch trace still have to be
-captured in the target AWS account before submission.
+### Deployment profiles and tenant boundary
 
-The sample intake queue is intentionally process-local, so the ECS Express service must start
-with exactly one task. Completed audits remain durable in CockroachDB. Horizontal intake is a
-later step and requires a durable reported-cases table and distributed coordination rather
-than pretending the demo queue is shared.
+HindSight separates a public proof from an organization deployment instead of pretending that
+one configuration serves both jobs:
+
+| Profile | Purpose | Capacity and access |
+|---|---|---|
+| `showcase` | Public synthetic demonstration with a bounded idle cost | Fixed at one task; the API key is optional; WAF, shared quotas, provider budgets, concurrency leases, and reset-token protection remain active. |
+| `production` | Highly available deployment for one organization | CloudFormation rejects one-task or inverted capacity, permits bounded scaling, and requires `ApplicationApiKeySecretArn` plus enhanced observability. Business routes and dependency readiness require the matching Bearer token; `/health` and the data-free static dashboard shell/assets remain public. |
+
+The production boundary is **one isolated stack per organization**, with its own runtime secret,
+database scope, WAF, logs, quotas, roles, and application key. It is not a claim that callers can
+self-select a tenant namespace: no client-supplied `agent_id` or organization identifier grants
+cross-namespace access.
+
+The built-in browser page remains a public, data-free showcase shell and never embeds the
+deployment-wide Bearer key. Production consumers use authenticated API clients; an interactive
+organization UI needs an identity/session gateway in front of the stack.
+
+The shared `demo_workspaces` state machine persists `empty`/`prepared`/`running`/`completed`
+transitions, a version, a bounded JSON payload, and an expiring owner lease in CockroachDB.
+Atomic claims prevent two replicas from executing the same prepared workspace, and an expired
+lease can be reclaimed after a task dies. The application uses a lazy, bounded business pool
+per task (defaults: zero warm connections, five maximum, two-second checkout timeout, 900-second
+maximum lifetime) and checks a connection out only around a repository operation; provider
+latency does not reserve a database connection. The distributed rate limiter has its own lazy,
+bounded five-connection pool per task as an admission-control bulkhead. The configured hard
+ceiling is therefore `MaxTaskCount × (DatabasePoolMaxSize + RateLimitPoolMaxSize)`.
+Per-task server concurrency and socket backlog are also bounded, with short keep-alive and the
+120-second Fargate graceful-shutdown maximum, so overload is rejected instead of accumulating
+an unbounded queue. The current synchronous showcase audit can outlive that drain; durable state
+and expiring leases make interruption recoverable, but do not promise uninterrupted in-flight work.
+The showcase is fixed at one task and leaves paid Container Insights/dashboard resources off
+unless explicitly enabled after cost approval; production requires those measurements.
+Production autoscaling defaults to ALB request count per target, which responds to this
+I/O-heavy service without waiting for CPU saturation; the target remains an explicit parameter.
+Application request/provider budgets and shared provider concurrency are explicit production
+parameters as well. The showcase fixes `RateLimitScale=1` and `ProviderConcurrency=4`; a
+production operator can select larger reviewed values without rebuilding the image, but only
+within the approved CockroachDB and provider-spend budget.
+
+Infrastructure definitions are reproducible deployment inputs, not performance or availability
+evidence by themselves. Record the image digest, stack outputs, health/readiness, WAF behavior,
+alarms, capacity, and correlated CloudWatch traces only after an authorized deployment. Do not
+publish latency or throughput numbers until they have been captured with the procedure below.
 
 ### Rate limiting and public abuse protection
 
-Rate limiting is enabled by default and covers every HTTP request, including unknown paths
-and methods. The local profile uses a bounded in-memory token bucket. The ECS Express
-deployment profile must use CockroachDB-backed buckets so per-client and global limits survive
-task restarts and are shared when the service is later scaled beyond one task.
+Rate limiting is enabled by default and covers every authenticated business request plus public
+shell, asset, and unknown-route traffic; the static `/health` liveness probe is exempt. When
+application authentication is configured, invalid Bearer requests are rejected before touching
+CockroachDB-backed application buckets, while WAF remains their edge abuse ceiling. The local
+profile uses a bounded in-memory token bucket. The ECS Express deployment profile must use
+CockroachDB-backed buckets so per-client and global limits survive task restarts and are shared
+across every running replica.
 When `DATABASE_URL` is present and no backend override is supplied, startup selects the
 Cockroach backend and requires the HMAC key instead of silently falling back to process-local
 protection.
@@ -308,7 +363,6 @@ Default application policy:
 | Scope | Refill rate | Burst |
 |---|---:|---:|
 | local fallback, per client/process | 180/min | 30 |
-| liveness, per client/process | 120/min | 20 |
 | all API traffic, global | 600/min | 100 |
 | decision/workspace reads, per client | 60/min | 15 |
 | unsafe methods, per client | 10/min and 60/hour | 3 and 10 |
@@ -323,10 +377,19 @@ Default application policy:
 Rejected requests return `429` with `Retry-After`, `RateLimit-Limit`,
 `RateLimit-Remaining`, and `RateLimit-Reset`. A distributed limiter failure returns `503`
 before a protected handler can invoke CockroachDB, Bedrock, Titan, or MCP. `/health` is a
-cheap, locally limited liveness check, so a Cockroach outage does not make the container
-orchestrator recycle an otherwise diagnosable task. `/ready` is separately and globally
-bounded per process and fails if either the application database, bucket table, lease table,
-or grants are unusable.
+static liveness check and is exempt from application rate limiting: it carries no forwarded
+address, so it resolves to the same principal as any request whose `X-Forwarded-For` cannot be
+parsed, and a shared bucket would let that traffic throttle the probe and deregister the task.
+The edge rate rules remain its ceiling. `/ready` is bounded per client rather than globally,
+requires the application Bearer credential when authentication is enabled, and fails if either
+the application database, bucket table, lease table, or grants are unusable.
+
+Routes that call a provider take one of the four concurrency leases before consuming their
+non-refundable spend budget, so a request rejected for lack of execution capacity does not burn
+credits. A caller that fails the subsequent budget check releases its lease immediately. Bedrock
+conversation and embedding clients set explicit connect, read, and retry limits; their
+worst-case bounded duration is what keeps a lease from expiring mid-call, which would otherwise
+let the concurrency cap be exceeded.
 
 Client identities are stored only as HMAC-SHA256 values. Set
 `HINDSIGHT_RATE_LIMIT_HMAC_KEY` to at least 32 random bytes and keep it in Secrets Manager
@@ -339,8 +402,9 @@ Load Balancer in front of the task, so the deployment must configure trusted pro
 CIDRs for the actual load-balancer/VPC boundary. The App Runner-specific trust mode is retained
 only for legacy compatibility and must remain disabled in ECS.
 
-The runtime database role needs only the limiter table operations below in addition to its
-existing application grants. Replace the example role with the actual runtime principal:
+The runtime database role needs only the limiter and durable-workspace operations below in
+addition to its existing application grants. Replace the example role with the actual runtime
+principal:
 
 ```sql
 GRANT SELECT, INSERT, UPDATE
@@ -350,17 +414,23 @@ TO hindsight_app;
 GRANT SELECT, INSERT, DELETE
 ON TABLE api_rate_limit_leases
 TO hindsight_app;
+
+GRANT SELECT, INSERT, UPDATE
+ON TABLE demo_workspaces
+TO hindsight_app;
 ```
 
 The ECS Express stack attaches a regional AWS WAF web ACL to the generated Application Load
 Balancer. AWS IP-reputation, known-bad-input, and common-protection groups sit in front of
 three rate controls: 300 requests/minute per source IP overall, 10 requests/minute per IP for
-`POST /demo/seed`, `POST /demo/reset`, and `GET /memories/search`, plus 120 expensive
-requests/minute across all clients. WAF metrics are enabled without sampled request bodies.
+`POST /demo/seed`, `POST /demo/reset`, `POST /demo/prepare`, and `GET /memories/search`, plus
+120 expensive requests/minute across all clients.
 Encoded and non-normalized paths are transformed before comparison, and edge rejections use the same
-`429`/`Retry-After` contract. Only blocked WAF requests are retained in CloudWatch Logs; query
-strings, authorization, cookies, and the reset-token header are redacted. The stack generates
-and injects a stable 64-character `HINDSIGHT_RATE_LIMIT_HMAC_KEY`.
+`429`/`Retry-After` contract. Blocked *and* counted WAF requests are retained in CloudWatch
+Logs so that `ManagedRulesMode=COUNT` is observable; query strings, authorization, cookies, and
+the reset-token header are redacted. Sampled requests stay disabled because the console sample
+viewer does not apply those redactions. The stack generates and injects a stable 64-character
+`HINDSIGHT_RATE_LIMIT_HMAC_KEY`.
 Application quotas remain necessary because WAF rate rules are approximate and cannot account
 for the multiple provider calls performed inside one accepted request.
 
@@ -369,17 +439,21 @@ Useful controls:
 ```dotenv
 HINDSIGHT_RATE_LIMIT_ENABLED=true
 HINDSIGHT_RATE_LIMIT_BACKEND=auto
+HINDSIGHT_RATE_LIMIT_POOL_MAX_SIZE=5
 HINDSIGHT_RATE_LIMIT_SCALE=1
+HINDSIGHT_PROVIDER_CONCURRENCY=4
 HINDSIGHT_RATE_LIMIT_MAX_LOCAL_BUCKETS=50000
 HINDSIGHT_RATE_LIMIT_TRUSTED_PROXY_HOPS=0
 HINDSIGHT_RATE_LIMIT_TRUST_APP_RUNNER_XFF=false
 ```
 
 `HINDSIGHT_RATE_LIMIT_SCALE` accepts `0.1` through `10` and changes application capacities
-without weakening the separation between route classes. `auto` resolves to CockroachDB when a
-database URL exists and to bounded process memory otherwise. The ECS stack does not expose a
-switch to disable WAF or the Cockroach-backed application limiter: WAF remains an additional
-edge layer, not a replacement for global provider budgets and concurrency leases.
+without weakening the separation between route classes. `HINDSIGHT_PROVIDER_CONCURRENCY`
+controls the shared live-provider lease (the deployment template permits 1–64 reviewed slots).
+`auto` resolves to CockroachDB when a database URL exists and to bounded process memory otherwise.
+The ECS stack does not expose a switch to disable WAF or the Cockroach-backed application
+limiter: WAF remains an additional edge layer, not a replacement for global provider budgets and
+concurrency leases.
 
 `POST /demo/reset` is absent unless `HINDSIGHT_DEMO_RESET_TOKEN` is configured. When enabled,
 it requires that value in `X-Demo-Reset-Token`, cannot race an active audit, and deletes only
@@ -402,7 +476,7 @@ aws cloudformation deploy `
   --stack-name hindsight-tariff-ingestion `
   --capabilities CAPABILITY_IAM `
   --parameter-overrides TariffBucketName=<unique-name> `
-    LambdaImageUri=<ecr-image-uri> DatabaseSecretArn=<secret-arn>
+    LambdaImageUri=<ecr-image-uri>@sha256:<digest> DatabaseSecretArn=<secret-arn>
 ```
 
 Upload UTF-8 files under `tariffs/*.csv` with this exact header:
@@ -418,10 +492,11 @@ the main decision demo:
 aws s3 cp examples/tariffs/demo-rates.csv s3://<bucket-name>/tariffs/demo-rates.csv
 ```
 
-The MVP accepts ordered `voice/minute` versions only, up to 2 MB and 10,000 rows per
-object. Parsing, hashing, validation, and preparation are O(bytes + rows); each row is then
-appended once. S3 delivery is still at-least-once and unordered, so the content checksum and
-database constraints provide idempotence while older backfills fail into the queue for review.
+The stack accepts only the explicit byte caps `100000`, `500000`, `1000000`, or `2000000` and
+row caps `100`, `500`, `1000`, `5000`, or `10000`; the defaults are 2 MB and 10,000 rows.
+Parsing, hashing, validation, and preparation are O(bytes + rows); each row is then appended
+once. S3 delivery is still at-least-once and unordered, so the content checksum and database
+constraints provide idempotence while older backfills fail into the queue for review.
 
 ### Synthetic CDRs
 
@@ -434,7 +509,7 @@ aws cloudformation deploy `
   --stack-name hindsight-cdr-ingestion `
   --capabilities CAPABILITY_IAM `
   --parameter-overrides CdrBucketName=<unique-name> `
-    LambdaImageUri=<ecr-image-uri> DatabaseSecretArn=<secret-arn>
+    LambdaImageUri=<ecr-image-uri>@sha256:<digest> DatabaseSecretArn=<secret-arn>
 aws s3 cp examples/cdrs/demo-cdrs.csv s3://<bucket-name>/cdrs/demo-cdrs.csv
 ```
 
@@ -447,7 +522,13 @@ external_id,msisdn_hash,route,service_type,started_at,duration_sec
 Only synthetic voice rows are accepted. `msisdn_hash` must be a lowercase 64-character
 SHA-256 value and duration must be between 1 and 86,400 seconds. Object parsing is
 O(bytes + rows); the object checksum and stable external IDs make repeated S3 delivery a
-database-level no-op.
+database-level no-op. The CDR stack enforces the same explicit byte and row-cap choices as the
+tariff stack.
+
+Both ingestion stacks let CloudFormation generate a stack-scoped Lambda name, require an image
+pinned by digest, and default to one worker. `ReservedConcurrency` can be selected only from
+`1`, `2`, `4`, `8`, or `16`; raise it only after checking Lambda cost and confirming that the
+CockroachDB connection/write budget can absorb the same number of parallel invocations.
 
 ## Knowledge-at-Decision-Time benchmark
 
@@ -475,6 +556,24 @@ uv run python scripts/ops_preflight.py --mode live --json
 Live mode checks that the deployment CLIs, runtime flags, and required environment variable
 names are present. It does not contact CockroachDB or AWS and never prints secret values;
 actual connectivity remains a separate, explicit deployment step.
+
+## Performance evidence
+
+Every HTTP response carries an `X-Correlation-ID`. Structured `request_complete` events record
+the method, normalized route, status, server-side handling duration, and UTC completion time;
+bounded `performance_span` events use the same correlation ID for workflow, CockroachDB checkout,
+Bedrock Converse, Titan embedding, memory retrieval, and managed MCP operations. Span labels are
+code-defined and the events never include prompts, SQL, credentials, exception messages, or
+request bodies.
+
+[`scripts/performance_evidence.py`](scripts/performance_evidence.py) turns an explicitly bounded
+local JSONL export into deterministic request and component counts plus p50/p95/p99 durations.
+It rejects empty captures, events outside the declared UTC window, request counts above the
+declared cap, and spans not linked to a completed request. It performs no network, AWS,
+CockroachDB, or load-generation work. The exact authorization, capture, sanitization, and
+reproducibility procedure is in
+[`evidence/performance/README.md`](evidence/performance/README.md). No production performance
+figures are claimed in this README until an authorized run has produced a reviewed report.
 
 ## Temporal model
 
@@ -563,12 +662,12 @@ flowchart TB
     API --> DASHBOARD
 ```
 
-The ECS Express, ECR, and S3/Lambda infrastructure definitions are ready for deployment.
-Nothing has been deployed from this checkout, so the next critical milestone is live
-end-to-end verification in the target AWS account: immutable image push, stack completion,
-public health/readiness, WAF enforcement, alarms, budget, and CloudWatch evidence. The
-remaining product work is the rest of the telecom mutation API, durable multi-instance
-incident intake, and stronger agent namespace access control.
+The repository contains the application, migrations, CI checks, and AWS infrastructure needed
+for a bounded showcase or an isolated highly available organization stack. A release is accepted
+only when its own immutable image digest, migration state, stack outputs, public probes, access
+control, WAF behavior, alarms, and correlated traces have been captured. Until that evidence is
+recorded for a specific environment, the repository makes no availability, scale, latency, or
+throughput claim about that environment.
 
 ## Demo data and safety
 

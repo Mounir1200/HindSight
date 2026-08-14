@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import hindsight.infrastructure.rate_limits as rate_limit_store_module
+import hindsight.web.rate_limit as web_rate_limit_module
 from hindsight.core.rate_limits import RateLimitBucket, RateLimitStoreError
 from hindsight.infrastructure.rate_limits import (
     CockroachTokenBucketStore,
@@ -328,6 +329,13 @@ def test_trusted_proxy_chain_uses_the_bounded_rightmost_hops() -> None:
         (
             {
                 "HINDSIGHT_RATE_LIMIT_BACKEND": "memory",
+                "HINDSIGHT_PROVIDER_CONCURRENCY": "0",
+            },
+            "must be between 1 and 100",
+        ),
+        (
+            {
+                "HINDSIGHT_RATE_LIMIT_BACKEND": "memory",
                 "HINDSIGHT_RATE_LIMIT_TRUSTED_PROXY_HOPS": "1",
                 "HINDSIGHT_RATE_LIMIT_TRUSTED_PROXY_CIDRS": "0.0.0.0/0",
             },
@@ -370,17 +378,52 @@ def test_auto_backend_uses_cockroach_with_a_database_and_memory_without_one() ->
     assert local.backend == "memory"
 
 
+def test_shared_rate_limit_pool_has_an_explicit_bounded_size(monkeypatch) -> None:
+    created: dict[str, object] = {}
+
+    class Store:
+        def __init__(self, database_url: str, **options: object) -> None:
+            created["database_url"] = database_url
+            created.update(options)
+
+    monkeypatch.setattr(web_rate_limit_module, "CockroachTokenBucketStore", Store)
+    environment = {
+        "HINDSIGHT_RATE_LIMIT_BACKEND": "cockroach",
+        "HINDSIGHT_RATE_LIMIT_HMAC_KEY": "a" * 32,
+        "HINDSIGHT_RATE_LIMIT_POOL_MAX_SIZE": "7",
+    }
+
+    web_rate_limit_module.build_rate_limiter(
+        "postgresql://runtime",
+        environment=environment,
+    )
+
+    assert created == {
+        "database_url": "postgresql://runtime",
+        "max_pool_size": 7,
+    }
+    environment["HINDSIGHT_RATE_LIMIT_POOL_MAX_SIZE"] = "21"
+    with pytest.raises(ValueError, match="must be between 1 and 20"):
+        web_rate_limit_module.build_rate_limiter(
+            "postgresql://runtime",
+            environment=environment,
+        )
+
+
 def test_default_policy_covers_fallback_dynamic_routes_and_provider_costs() -> None:
-    policy = DefaultRateLimitPolicy()
+    policy = DefaultRateLimitPolicy(provider_concurrency=7)
     first_decision = policy.rules("GET", "/decisions/11111111-1111-1111-1111-111111111111")
     second_decision = policy.rules("GET", "/decisions/22222222-2222-2222-2222-222222222222")
     unknown_write = policy.rules("PATCH", "/future/resource/123")
     seed = policy.rules("POST", "/demo/seed/")
     seed_execution = policy.operation_rules("demo-seed-execution")
     seed_provider = policy.operation_rules("demo-seed-provider")
+    workspace_lease = policy.lease_rule("demo-workspace-exclusive")
+    reset_lease = policy.lease_rule("demo-reset-authorized")
 
-    assert [rule.policy_id for rule in policy.rules("GET", "/health")] == ["health-local"]
-    assert [rule.policy_id for rule in policy.rules("GET", "/ready")] == ["readiness-local"]
+    assert policy.rules("GET", "/health") == ()
+    assert [rule.policy_id for rule in policy.rules("GET", "/ready")] == ["readiness-client"]
+    assert all(rule.scope == "client" for rule in policy.rules("GET", "/ready"))
     assert [rule.policy_id for rule in first_decision] == [
         rule.policy_id for rule in second_decision
     ]
@@ -392,6 +435,13 @@ def test_default_policy_covers_fallback_dynamic_routes_and_provider_costs() -> N
     assert provider.cost == 8
     assert provider.scope == "global"
     assert global_seed.burst == 1
+    assert workspace_lease is not None
+    assert reset_lease is not None
+    assert workspace_lease.lease_key == reset_lease.lease_key == "demo-workspace-execution"
+    assert workspace_lease.slots == reset_lease.slots == 1
+    provider_lease = policy.lease_rule("demo-seed-provider")
+    assert provider_lease is not None
+    assert provider_lease.slots == 7
 
 
 def test_middleware_returns_a_stable_429_without_calling_the_handler_again(caplog) -> None:
@@ -464,6 +514,24 @@ def test_limiter_backend_failure_is_fail_closed_but_health_remains_available(cap
     assert protected.headers["cache-control"] == "no-store"
     assert calls == 0
     assert "private limiter connection detail" not in caplog.text
+
+
+def test_authentication_rejects_before_the_shared_limiter_is_touched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HINDSIGHT_API_KEY", "production-key-" + ("a" * 48))
+    limiter = RateLimiter(
+        _config(),
+        FailingStore(),
+        policy=FixedPolicy(),
+        clock=lambda: 0,
+    )
+
+    with TestClient(create_app(database_url="", rate_limiter=limiter)) as client:
+        response = client.get(f"/decisions/{DECISION_ID}")
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "authentication_required"}
 
 
 def test_unknown_path_churn_uses_one_bounded_fallback_bucket() -> None:

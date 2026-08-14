@@ -7,6 +7,10 @@ Parameters:
     Description: Globally unique bucket name for synthetic CDR CSV uploads
   LambdaImageUri:
     Type: String
+    MinLength: 80
+    MaxLength: 512
+    AllowedPattern: "^\\S+@sha256:[0-9a-f]{64}$"
+    ConstraintDescription: Use an immutable ECR image URI ending in @sha256:<64 lowercase hex characters>
     Description: Immutable ECR image URI built with Dockerfile.lambda
   DatabaseSecretArn:
     Type: String
@@ -14,11 +18,16 @@ Parameters:
   MaxIngestionBytes:
     Type: Number
     Default: 2000000
-    MinValue: 1
+    AllowedValues: [100000, 500000, 1000000, 2000000]
   MaxCdrRows:
     Type: Number
     Default: 10000
-    MinValue: 1
+    AllowedValues: [100, 500, 1000, 5000, 10000]
+  ReservedConcurrency:
+    Type: Number
+    Default: 1
+    AllowedValues: [1, 2, 4, 8, 16]
+    Description: Maximum parallel ingestion workers; increase only within the approved database and Lambda budget
 
 Resources:
   CdrIngestionRole:
@@ -65,7 +74,6 @@ Resources:
   CdrIngestionFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: hindsight-cdr-ingestion
       PackageType: Image
       Code:
         ImageUri: !Ref LambdaImageUri
@@ -77,7 +85,7 @@ Resources:
         - x86_64
       MemorySize: 512
       Timeout: 30
-      ReservedConcurrentExecutions: 1
+      ReservedConcurrentExecutions: !Ref ReservedConcurrency
       Environment:
         Variables:
           DATABASE_SECRET_ARN: !Ref DatabaseSecretArn

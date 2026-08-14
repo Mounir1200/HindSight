@@ -182,7 +182,11 @@ def test_wrong_verbs_and_validation_errors_do_not_debit_provider_budget(
     store = RecordingStore()
     limiter = RateLimiter(_config(), store, clock=lambda: 0)
     reader = FailingVectorReader()
-    monkeypatch.setattr(web_app_module, "build_memory_search_reader", lambda _url: reader)
+    monkeypatch.setattr(
+        web_app_module,
+        "build_memory_search_reader",
+        lambda _url, **_options: reader,
+    )
 
     with TestClient(create_app(database_url="", rate_limiter=limiter)) as client:
         wrong_search_verb = client.post("/memories/search")
@@ -222,7 +226,11 @@ def test_structured_memory_search_does_not_use_provider_budget(
     limiter = RateLimiter(_config(), store, clock=lambda: 0)
     reader = FailingVectorReader()
     reader.vector_enabled = False
-    monkeypatch.setattr(web_app_module, "build_memory_search_reader", lambda _url: reader)
+    monkeypatch.setattr(
+        web_app_module,
+        "build_memory_search_reader",
+        lambda _url, **_options: reader,
+    )
 
     with TestClient(create_app(database_url="", rate_limiter=limiter)) as client:
         response = client.get("/memories/search", params=_search_params())
@@ -359,7 +367,10 @@ def test_regressive_clock_does_not_refill_or_rewind_a_bucket() -> None:
     assert store.consume((bucket,), 160)[0].allowed is True
 
 
-def test_health_rate_limit_is_isolated_per_client() -> None:
+def test_health_is_never_throttled_even_when_a_client_shares_the_probe_principal() -> None:
+    """A load-balancer probe carries no forwarded address, so it resolves to the
+    proxy peer. Any request whose X-Forwarded-For cannot be parsed resolves to the
+    same principal, so a shared bucket would let that traffic deregister the task."""
     limiter = RateLimiter(
         _config(),
         InMemoryTokenBucketStore(),
@@ -371,9 +382,28 @@ def test_health_rate_limit_is_isolated_per_client() -> None:
         TestClient(app, client=("203.0.113.10", 50_000)) as noisy_client,
         TestClient(app, client=("198.51.100.20", 50_000)) as probe_client,
     ):
-        accepted = [noisy_client.get("/health") for _ in range(20)]
-        rejected = noisy_client.get("/health")
-        isolated = probe_client.get("/health")
+        flood = [noisy_client.get("/health") for _ in range(200)]
+        probe = probe_client.get("/health")
+
+    assert all(response.status_code == 200 for response in flood)
+    assert probe.status_code == 200
+
+
+def test_readiness_throttles_one_caller_without_starving_another() -> None:
+    limiter = RateLimiter(
+        _config(),
+        InMemoryTokenBucketStore(),
+        clock=lambda: 0,
+    )
+    app = create_app(database_url="", health_probe=lambda: None, rate_limiter=limiter)
+
+    with (
+        TestClient(app, client=("203.0.113.11", 50_000)) as noisy_client,
+        TestClient(app, client=("198.51.100.21", 50_000)) as probe_client,
+    ):
+        accepted = [noisy_client.get("/ready") for _ in range(30)]
+        rejected = noisy_client.get("/ready")
+        isolated = probe_client.get("/ready")
 
     assert all(response.status_code == 200 for response in accepted)
     assert rejected.status_code == 429
