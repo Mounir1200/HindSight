@@ -1,0 +1,32 @@
+{
+  "commit_sha": "REPLACE_WITH_FULL_COMMIT_SHA",
+  "configuration": {
+    "application_auth_enabled": false,
+    "autoscaling_metric": "REQUEST_COUNT_PER_TARGET",
+    "autoscaling_target_value": 300,
+    "bedrock_enabled": true,
+    "database_pool_max_size": 5,
+    "deployment_profile": "showcase",
+    "desired_tasks": 1,
+    "duration_cap_seconds": 60,
+    "enhanced_observability": false,
+    "max_tasks": 1,
+    "mcp_enabled": true,
+    "min_tasks": 1,
+    "provider_concurrency": 4,
+    "rate_limit_scale": 1,
+    "rate_limit_pool_max_size": 5,
+    "region": "REPLACE_WITH_AWS_REGION",
+    "request_cap": 20,
+    "retry_cap": 1,
+    "server_backlog": 512,
+    "server_limit_concurrency": 256,
+    "task_cpu_units": 1024,
+    "task_memory_mib": 2048,
+    "test_concurrency": 2,
+    "vector_enabled": true,
+    "window_ended_at": "REPLACE_WITH_UTC_WINDOW_END",
+    "window_started_at": "REPLACE_WITH_UTC_WINDOW_START"
+  },
+  "image_digest": "sha256:REPLACE_WITH_64_HEXADECIMAL_CHARACTERS"
+}

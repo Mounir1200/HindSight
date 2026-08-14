@@ -24,7 +24,8 @@ LOCAL_FILES = (
 DEPLOYMENT_FILES = (
     "Dockerfile",
     "Dockerfile.lambda",
-    "deploy/apprunner-service.yaml",
+    "deploy/ecr-bootstrap.yaml",
+    "deploy/ecs-express-service.yaml",
     "deploy/tariff-ingestion.yaml",
     "deploy/cdr-ingestion.yaml",
 )
@@ -39,6 +40,7 @@ MIGRATIONS = (
     "008_investigation_contexts.sql",
     "009_investigation_context_snapshots.sql",
     "010_workspace_indexes.sql",
+    "011_rate_limits.sql",
 )
 LIVE_COMMANDS = ("docker", "aws", "ccloud")
 LIVE_ENV = (
@@ -47,6 +49,7 @@ LIVE_ENV = (
     "BEDROCK_MODEL_ID",
     "COCKROACH_MCP_CLUSTER_ID",
     "COCKROACH_MCP_API_KEY",
+    "HINDSIGHT_RATE_LIMIT_HMAC_KEY",
 )
 LIVE_FLAGS = (
     "HINDSIGHT_DEMO_BEDROCK",

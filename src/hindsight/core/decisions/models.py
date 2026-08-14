@@ -118,8 +118,7 @@ class DecisionJournalEntry:
             tuple(sorted(self.evidence, key=_evidence_sort_key)),
         )
         if not any(
-            item.assertion_id == self.record.selected_assertion_id
-            and item.was_used_for_decision
+            item.assertion_id == self.record.selected_assertion_id and item.was_used_for_decision
             for item in self.evidence
         ):
             raise ValueError("selected assertion must be recorded as used evidence")

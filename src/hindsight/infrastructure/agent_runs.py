@@ -18,6 +18,11 @@ from hindsight.core.agents.repository import (
     AgentRunStateError,
 )
 
+
+class AgentRunAmbiguousCommitError(AgentRunStateError):
+    """The agent-journal commit outcome must be checked on a fresh connection."""
+
+
 INSERT_RUN_SQL = """
 INSERT INTO agent_runs (
   id, correlation_id, domain, agent_id, run_type, subject_type, subject_id,
@@ -252,7 +257,7 @@ class CockroachAgentRunRepository:
             if getattr(error, "sqlstate", None) != "40003":
                 raise
             if self._connection_factory is None:
-                raise AgentRunStateError(
+                raise AgentRunAmbiguousCommitError(
                     "agent journal commit outcome is unknown; retry with a fresh connection"
                 ) from error
             with self._connection_factory() as connection:

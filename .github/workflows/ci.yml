@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        with:
+          version: "0.11.19"
+          enable-cache: false
+
+      - name: Install locked dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Validate CloudFormation
+        run: uvx --from cfn-lint==1.53.1 cfn-lint deploy/*.yaml
+
+      - name: Run local tests
+        run: uv run pytest
+
+      - name: Build Python package
+        run: uv build
+
+      - name: Build web container
+        run: docker build --tag hindsight-web-ci:${{ github.sha }} .
+
+      - name: Start web container without cloud configuration
+        run: >-
+          docker run --detach --name hindsight-web-smoke
+          --publish 127.0.0.1:8000:8000
+          hindsight-web-ci:${{ github.sha }}
+
+      - name: Verify container liveness
+        run: |
+          for attempt in {1..20}; do
+            if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:8000/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs hindsight-web-smoke
+          exit 1
+
+      - name: Stop web smoke container
+        if: always()
+        run: docker rm --force hindsight-web-smoke || true
+
+      - name: Build ingestion container
+        run: docker build --file Dockerfile.lambda --tag hindsight-lambda-ci:${{ github.sha }} .

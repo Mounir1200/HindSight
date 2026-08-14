@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -255,6 +256,36 @@ def test_durable_reader_uses_vector_store_and_embedder_only_when_enabled() -> No
     assert len(embedder.calls) == 1
     assert any("FROM memory_embeddings" in sql for sql, _ in connection.calls)
     assert connection.closed is True
+
+
+def test_vector_embedding_finishes_before_a_pooled_database_checkout() -> None:
+    events: list[str] = []
+    connection = RecordingConnection()
+
+    class OrderedEmbedder(RecordingEmbedder):
+        def embed(self, text: str) -> TextEmbedding:
+            events.append("embed")
+            return super().embed(text)
+
+    @contextmanager
+    def checkout():
+        events.append("checkout")
+        yield connection
+        events.append("return")
+
+    embedder = OrderedEmbedder()
+    reader = CockroachMemorySearchReader(
+        "postgresql://not-exposed",
+        vector_enabled=True,
+        embedding_model_id=embedder.model_id,
+        connection_context_factory=checkout,
+        embedder_factory=lambda: embedder,
+    )
+
+    _lookup_from_request(reader)
+
+    assert events == ["embed", "checkout", "return"]
+    assert connection.closed is False
 
 
 def _lookup_from_request(reader: CockroachMemorySearchReader):

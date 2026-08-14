@@ -1,13 +1,14 @@
 import json
 import logging
 import os
+import re
 from collections.abc import Callable
-from datetime import datetime
+from contextlib import AbstractContextManager, asynccontextmanager, suppress
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
 from hmac import compare_digest
 from pathlib import Path
-from threading import Lock
 from time import perf_counter
 from uuid import UUID, uuid4
 
@@ -28,10 +29,39 @@ from hindsight.adapters.telecom.seed import (
     FOLLOW_UP_DEMO_CASE,
     PRIMARY_DEMO_CASE,
 )
-from hindsight.infrastructure.database import connect_database
+from hindsight.infrastructure.database import (
+    CockroachDatabasePool,
+    DatabaseCapacityError,
+    DatabasePoolConfig,
+    connect_database,
+)
+from hindsight.infrastructure.demo_workspaces import (
+    CockroachDemoWorkspaceRepository,
+    DemoWorkspaceBusyError,
+    DemoWorkspaceConflictError,
+    DemoWorkspaceState,
+    InMemoryDemoWorkspaceRepository,
+)
+from hindsight.infrastructure.provider_budget import DEMO_WORKSPACE_LEASE_SECONDS
+from hindsight.telemetry import (
+    current_performance_span,
+    current_performance_trace,
+    performance_trace,
+)
+from hindsight.web.api_auth import ApiKeyAuthenticator
 from hindsight.web.memory_search import (
     build_memory_search_reader,
     create_memory_search_router,
+)
+from hindsight.web.provider_admission import (
+    admit_provider_operation,
+    provider_admission_response,
+    release_provider_lease,
+)
+from hindsight.web.rate_limit import (
+    RateLimiter,
+    RateLimitUnavailableError,
+    build_rate_limiter,
 )
 from hindsight.web.runtime import DemoRuntimeConfig
 
@@ -40,6 +70,7 @@ DemoResetter = Callable[[], None]
 HealthProbe = Callable[[], None]
 WorkspaceReader = Callable[[], dict[str, object]]
 DecisionReader = Callable[[UUID], dict[str, object] | None]
+WorkspaceRepository = InMemoryDemoWorkspaceRepository | CockroachDemoWorkspaceRepository
 STATIC_DIRECTORY = Path(__file__).with_name("static")
 logger = logging.getLogger("hindsight.web")
 MAX_EVIDENCE_ITEMS = 64
@@ -53,6 +84,26 @@ SENSITIVE_FIELD_MARKERS = (
     "password",
     "secret",
     "token",
+)
+PUBLIC_PATHS = frozenset({"/", "/health"})
+PUBLIC_PATH_PREFIXES = ("/assets/",)
+STABLE_REQUEST_PATHS = frozenset(
+    {
+        "/",
+        "/health",
+        "/ready",
+        "/demo/prepare",
+        "/demo/reset",
+        "/demo/seed",
+        "/demo/workspace",
+        "/memories/search",
+    }
+)
+DECISION_REQUEST_PATH_PATTERN = re.compile(
+    r"^/decisions/"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"(?P<suffix>/(?:truth|knowledge|evidence|verdict))?$",
+    re.IGNORECASE,
 )
 
 AUDITS_SQL = """
@@ -206,34 +257,99 @@ def create_app(
     health_probe: HealthProbe | None = None,
     workspace_reader: WorkspaceReader | None = None,
     decision_reader: DecisionReader | None = None,
+    rate_limiter: RateLimiter | None = None,
+    workspace_repository: WorkspaceRepository | None = None,
+    database_pool: CockroachDatabasePool | None = None,
 ) -> FastAPI:
     logger.setLevel(_log_level())
     resolved_database_url = database_url if database_url is not None else os.getenv("DATABASE_URL")
     backend = "cockroachdb" if resolved_database_url else "in_memory"
-    runner = demo_runner or DemoRuntimeConfig.from_environment(resolved_database_url).runner()
-    resetter = demo_resetter or _demo_resetter(resolved_database_url)
+    runtime_config = (
+        DemoRuntimeConfig.from_environment(resolved_database_url) if demo_runner is None else None
+    )
+    owned_database_pool = (
+        CockroachDatabasePool(
+            resolved_database_url,
+            config=DatabasePoolConfig.from_environment(),
+        )
+        if resolved_database_url and database_pool is None
+        else None
+    )
+    business_pool = database_pool or owned_database_pool
+    if runtime_config is not None:
+        runner = runtime_config.runner(
+            business_pool.checkout if business_pool is not None else None
+        )
+        demo_uses_provider = (
+            runtime_config.bedrock_model_id is not None or runtime_config.vector_enabled
+        )
+    else:
+        runner = demo_runner
+        demo_uses_provider = True
+    resetter = demo_resetter or _demo_resetter(
+        resolved_database_url,
+        connection_context_factory=(business_pool.checkout if business_pool is not None else None),
+    )
     reset_token = _configured_reset_token()
-    probe = health_probe or _health_probe(resolved_database_url)
-    workspace_state = _empty_workspace()
-    demo_state = "empty"
-    state_lock = Lock()
+    probe = health_probe or (
+        business_pool.validate
+        if business_pool is not None
+        else _health_probe(resolved_database_url)
+    )
+    workspaces = workspace_repository or (
+        CockroachDemoWorkspaceRepository(business_pool.checkout)
+        if business_pool is not None
+        else InMemoryDemoWorkspaceRepository()
+    )
+    workspace_id = "showcase"
+    limiter = rate_limiter or build_rate_limiter(resolved_database_url)
+    authenticator = ApiKeyAuthenticator.from_environment()
+    startup_readiness_check = _startup_readiness_check_enabled()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if business_pool is not None:
+            await run_in_threadpool(business_pool.open)
+        try:
+            await run_in_threadpool(limiter.open)
+            try:
+                if startup_readiness_check:
+                    await run_in_threadpool(probe)
+                    await run_in_threadpool(limiter.probe)
+                yield
+            finally:
+                await run_in_threadpool(limiter.close)
+        finally:
+            if owned_database_pool is not None:
+                await run_in_threadpool(owned_database_pool.close)
 
     def read_workspace() -> dict[str, object]:
         persisted = _empty_workspace()
         if workspace_reader is not None:
             persisted = workspace_reader()
         elif resolved_database_url:
-            persisted = _database_workspace(resolved_database_url)
-        with state_lock:
-            local = workspace_state
-            state = demo_state
+            persisted = _database_workspace(
+                resolved_database_url,
+                connection_context_factory=(
+                    business_pool.checkout if business_pool is not None else None
+                ),
+            )
+        record = workspaces.read(workspace_id)
+        local = record.payload if record is not None else _empty_workspace()
+        state = record.state.value if record is not None else DemoWorkspaceState.EMPTY.value
         return _workspace_view(local, persisted, state)
 
     def read_decision(decision_id: UUID) -> dict[str, object] | None:
         if decision_reader is not None:
             return decision_reader(decision_id)
         if resolved_database_url:
-            return _database_decision(resolved_database_url, decision_id)
+            return _database_decision(
+                resolved_database_url,
+                decision_id,
+                connection_context_factory=(
+                    business_pool.checkout if business_pool is not None else None
+                ),
+            )
         return None
 
     app = FastAPI(
@@ -242,33 +358,144 @@ def create_app(
         version="0.1.0",
         docs_url=None,
         redoc_url=None,
+        lifespan=lifespan,
     )
     app.include_router(
-        create_memory_search_router(build_memory_search_reader(resolved_database_url))
+        create_memory_search_router(
+            build_memory_search_reader(
+                resolved_database_url,
+                connection_context_factory=(
+                    business_pool.checkout if business_pool is not None else None
+                ),
+            ),
+            rate_limiter=limiter,
+        )
     )
 
-    @app.middleware("http")
-    async def request_context(request: Request, call_next: Callable[..., object]):
-        correlation_id = str(uuid4())
+    async def _request_context_without_trace(
+        request: Request,
+        call_next: Callable[..., object],
+        correlation_id: str,
+    ):
         started_at = perf_counter()
         request.state.correlation_id = correlation_id
-        try:
-            response = await call_next(request)
-        except Exception as error:
-            logger.error(
+        normalized_path = _normalized_request_path(request.scope.get("path", request.url.path))
+        rate_decision = None
+        peer_host = request.client.host if request.client is not None else None
+        forwarded_for = tuple(request.headers.getlist("x-forwarded-for"))
+        principal = limiter.resolve_client_principal(peer_host, forwarded_for)
+        request.state.rate_limit_principal = principal
+        if _requires_api_auth(request.url.path) and not authenticator.authorizes(
+            request.headers.get("authorization")
+        ):
+            logger.warning(
                 json.dumps(
                     {
-                        "event": "request_failed",
+                        "event": "request_authentication_failed",
                         "correlation_id": correlation_id,
-                        "error_type": type(error).__name__,
+                        "method": request.method,
+                        "path": normalized_path,
                     },
                     separators=(",", ":"),
                 )
             )
             response = JSONResponse(
-                status_code=500,
-                content={"detail": "internal_error", "correlation_id": correlation_id},
+                status_code=401,
+                content={"detail": "authentication_required"},
+                headers={"WWW-Authenticate": "Bearer"},
             )
+        else:
+            try:
+                rate_decision = await run_in_threadpool(
+                    limiter.check,
+                    method=request.method,
+                    path=request.scope.get("path", request.url.path),
+                    peer_host=peer_host,
+                    forwarded_for=forwarded_for,
+                    principal=principal,
+                )
+            except RateLimitUnavailableError:
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "rate_limit_unavailable",
+                            "correlation_id": correlation_id,
+                            "method": request.method,
+                            "path": normalized_path,
+                        },
+                        separators=(",", ":"),
+                    )
+                )
+                response = JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "rate_limit_unavailable",
+                        "correlation_id": correlation_id,
+                    },
+                )
+            else:
+                if rate_decision is not None and not rate_decision.allowed:
+                    logger.warning(
+                        json.dumps(
+                            {
+                                "event": "rate_limit_rejected",
+                                "correlation_id": correlation_id,
+                                "method": request.method,
+                                "path": normalized_path,
+                                "policy": rate_decision.policy_id,
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
+                    response = JSONResponse(
+                        status_code=429,
+                        content={"detail": "rate_limit_exceeded"},
+                    )
+                else:
+                    try:
+                        response = await call_next(request)
+                    except DatabaseCapacityError:
+                        logger.error(
+                            json.dumps(
+                                {
+                                    "event": "database_capacity_unavailable",
+                                    "correlation_id": correlation_id,
+                                    "method": request.method,
+                                    "path": normalized_path,
+                                },
+                                separators=(",", ":"),
+                            )
+                        )
+                        response = JSONResponse(
+                            status_code=503,
+                            content={
+                                "detail": "database_capacity_unavailable",
+                                "correlation_id": correlation_id,
+                            },
+                            headers={"Retry-After": "5"},
+                        )
+                    except Exception as error:
+                        logger.error(
+                            json.dumps(
+                                {
+                                    "event": "request_failed",
+                                    "correlation_id": correlation_id,
+                                    "error_type": type(error).__name__,
+                                },
+                                separators=(",", ":"),
+                            )
+                        )
+                        response = JSONResponse(
+                            status_code=500,
+                            content={
+                                "detail": "internal_error",
+                                "correlation_id": correlation_id,
+                            },
+                        )
+        if rate_decision is not None:
+            for name, value in rate_decision.headers.items():
+                if name not in response.headers:
+                    response.headers[name] = value
         response.headers["X-Correlation-ID"] = correlation_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -277,13 +504,19 @@ def create_app(
             "style-src 'self'; script-src 'self'; base-uri 'none'; "
             "frame-ancestors 'none'; form-action 'self'"
         )
-        if request.url.path.startswith("/decisions/") or request.url.path in {
-            "/health",
-            "/demo/prepare",
-            "/demo/reset",
-            "/demo/seed",
-            "/demo/workspace",
-        }:
+        if (
+            request.url.path.startswith("/decisions/")
+            or request.url.path
+            in {
+                "/health",
+                "/ready",
+                "/demo/prepare",
+                "/demo/reset",
+                "/demo/seed",
+                "/demo/workspace",
+            }
+            or response.status_code in {429, 503}
+        ):
             response.headers["Cache-Control"] = "no-store"
         logger.info(
             json.dumps(
@@ -291,24 +524,42 @@ def create_app(
                     "event": "request_complete",
                     "correlation_id": correlation_id,
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": normalized_path,
                     "status_code": response.status_code,
                     "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                    "observed_at": _utc_timestamp(),
                 },
                 separators=(",", ":"),
             )
         )
         return response
 
+    @app.middleware("http")
+    async def request_context(request: Request, call_next: Callable[..., object]):
+        correlation_id = str(uuid4())
+        with performance_trace(correlation_id):
+            return await _request_context_without_trace(request, call_next, correlation_id)
+
     @app.get("/health", tags=["operations"])
     async def health() -> JSONResponse:
+        return JSONResponse(
+            content={
+                "status": "ok",
+                "backend": backend,
+                "database": "unchecked",
+            }
+        )
+
+    @app.get("/ready", tags=["operations"])
+    async def readiness() -> JSONResponse:
         try:
             await run_in_threadpool(probe)
+            await run_in_threadpool(limiter.probe)
         except Exception as error:
             logger.warning(
                 json.dumps(
                     {
-                        "event": "health_check_failed",
+                        "event": "readiness_check_failed",
                         "error_type": type(error).__name__,
                     },
                     separators=(",", ":"),
@@ -316,16 +567,21 @@ def create_app(
             )
             return JSONResponse(
                 status_code=503,
-                content={"status": "unhealthy", "backend": backend},
+                content={"status": "not_ready", "backend": backend},
             )
         database = "reachable" if resolved_database_url else "not_configured"
-        return JSONResponse(content={"status": "ok", "backend": backend, "database": database})
+        return JSONResponse(
+            content={
+                "status": "ready",
+                "backend": backend,
+                "database": database,
+            }
+        )
 
     if reset_token is not None:
 
         @app.post("/demo/reset", tags=["demo"])
         async def reset_demo(request: Request) -> JSONResponse:
-            nonlocal demo_state, workspace_state
             supplied_token = request.headers.get("x-demo-reset-token", "")
             if not _valid_reset_token(reset_token, supplied_token):
                 logger.warning(
@@ -342,25 +598,34 @@ def create_app(
                     content={"detail": "demo_reset_forbidden"},
                 )
 
-            with state_lock:
-                if demo_state == "running":
+            admission = await run_in_threadpool(
+                admit_provider_operation,
+                limiter,
+                "demo-reset-authorized",
+                request.state.rate_limit_principal,
+            )
+            if not admission.granted:
+                return _workspace_admission_response(
+                    admission,
+                    request.state.correlation_id,
+                )
+
+            try:
+                try:
+                    await run_in_threadpool(workspaces.reset, workspace_id)
+                    await run_in_threadpool(resetter)
+                except DemoWorkspaceBusyError:
                     return JSONResponse(
                         status_code=409,
                         content={"detail": "audit_in_progress"},
                     )
-                previous_state = demo_state
-                previous_workspace = workspace_state
-                demo_state = "running"
-            try:
-                await run_in_threadpool(resetter)
-            except Exception:
-                with state_lock:
-                    demo_state = previous_state
-                    workspace_state = previous_workspace
-                raise
-            with state_lock:
-                workspace_state = _empty_workspace()
-                demo_state = "empty"
+            finally:
+                await run_in_threadpool(
+                    release_provider_lease,
+                    limiter,
+                    admission.lease,
+                    request.state.correlation_id,
+                )
             logger.info(
                 json.dumps(
                     {
@@ -373,45 +638,85 @@ def create_app(
             )
             return JSONResponse(content={"status": "reset", "backend": backend})
 
-    @app.post("/demo/seed", tags=["demo"])
-    async def seed_demo(request: Request) -> JSONResponse:
-        nonlocal demo_state, workspace_state
-        with state_lock:
-            if demo_state == "running":
-                return JSONResponse(
-                    status_code=409,
-                    content={"detail": "audit_in_progress"},
+    async def _seed_demo_with_workspace_lease(request: Request) -> JSONResponse:
+        correlation_id = request.state.correlation_id
+        lease_token = UUID(correlation_id)
+        claimed = await run_in_threadpool(
+            workspaces.claim,
+            workspace_id,
+            lease_token,
+            lease_seconds=DEMO_WORKSPACE_LEASE_SECONDS,
+        )
+        if claimed is None:
+            current = await run_in_threadpool(workspaces.read, workspace_id)
+            detail = (
+                "audit_in_progress"
+                if current is not None and current.state is DemoWorkspaceState.RUNNING
+                else "no_reported_incident"
+            )
+            return JSONResponse(status_code=409, content={"detail": detail})
+        incident = _reported_incident(claimed.payload)
+        if incident is None:
+            # Releasing the lease here matters more than the status code: leaving the
+            # row running would block every replica until the lease expires.
+            await run_in_threadpool(workspaces.restore, workspace_id, lease_token)
+            logger.error(
+                json.dumps(
+                    {
+                        "event": "demo_workspace_payload_invalid",
+                        "correlation_id": correlation_id,
+                    },
+                    separators=(",", ":"),
                 )
-            if demo_state != "prepared":
-                return JSONResponse(
-                    status_code=409,
-                    content={"detail": "no_reported_incident"},
-                )
-            incident = workspace_state["reported_incidents"][0]
-            demo_state = "running"
+            )
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "no_reported_incident"},
+            )
+        execution_operation = "demo-seed-provider" if demo_uses_provider else "demo-seed-execution"
+        admission = await run_in_threadpool(
+            admit_provider_operation,
+            limiter,
+            execution_operation,
+            request.state.rate_limit_principal,
+        )
+        if not admission.granted:
+            await run_in_threadpool(workspaces.restore, workspace_id, lease_token)
+            return provider_admission_response(admission, correlation_id)
+
         try:
-            payload = await run_in_threadpool(runner)
+            with current_performance_span(component="workflow", operation="demo.execute"):
+                payload = await run_in_threadpool(runner)
         except Exception as error:
-            with state_lock:
-                demo_state = "prepared"
-            _log_demo_agent_failure(request.state.correlation_id, error)
+            await run_in_threadpool(workspaces.restore, workspace_id, lease_token)
+            _log_demo_agent_failure(correlation_id, error)
             raise
+        finally:
+            await run_in_threadpool(
+                release_provider_lease,
+                limiter,
+                admission.lease,
+                correlation_id,
+            )
         if not _valid_demo_result(payload, incident):
-            with state_lock:
-                demo_state = "prepared"
+            await run_in_threadpool(workspaces.restore, workspace_id, lease_token)
             return JSONResponse(
                 status_code=500,
                 content={"detail": "invalid_demo_result"},
             )
-        with state_lock:
-            try:
-                completed_workspace = _workspace_from_demo(payload, workspace_state)
-            except Exception as error:
-                demo_state = "prepared"
-                _log_demo_agent_failure(request.state.correlation_id, error)
-                raise
-            workspace_state = completed_workspace
-            demo_state = "completed"
+        try:
+            completed_workspace = _json_payload(_workspace_from_demo(payload, claimed.payload))
+            await run_in_threadpool(
+                workspaces.complete,
+                workspace_id,
+                lease_token,
+                completed_workspace,
+            )
+        except Exception as error:
+            with suppress(DemoWorkspaceConflictError):
+                await run_in_threadpool(workspaces.restore, workspace_id, lease_token)
+            _log_demo_agent_failure(request.state.correlation_id, error)
+            raise
         logger.info(
             json.dumps(
                 {
@@ -422,32 +727,85 @@ def create_app(
                 separators=(",", ":"),
             )
         )
+        payload["performance_trace"] = list(current_performance_trace())
         payload["workspace"] = await run_in_threadpool(read_workspace)
         return JSONResponse(content=_json_payload(payload))
 
+    @app.post("/demo/seed", tags=["demo"])
+    async def seed_demo(request: Request) -> JSONResponse:
+        workspace_admission = await run_in_threadpool(
+            admit_provider_operation,
+            limiter,
+            "demo-workspace-exclusive",
+            request.state.rate_limit_principal,
+        )
+        if not workspace_admission.granted:
+            return _workspace_admission_response(
+                workspace_admission,
+                request.state.correlation_id,
+            )
+        try:
+            return await _seed_demo_with_workspace_lease(request)
+        finally:
+            await run_in_threadpool(
+                release_provider_lease,
+                limiter,
+                workspace_admission.lease,
+                request.state.correlation_id,
+            )
+
     @app.post("/demo/prepare", tags=["demo"])
-    async def prepare_demo() -> JSONResponse:
-        nonlocal demo_state, workspace_state
-        current = await run_in_threadpool(read_workspace)
-        replay = bool(current["sample_already_audited"])
-        history_snapshot = {"past_audits": current["past_audits"]}
-        with state_lock:
-            if demo_state == "running":
+    async def prepare_demo(request: Request) -> JSONResponse:
+        admission = await run_in_threadpool(
+            admit_provider_operation,
+            limiter,
+            "demo-workspace-exclusive",
+            request.state.rate_limit_principal,
+        )
+        if not admission.granted:
+            return _workspace_admission_response(
+                admission,
+                request.state.correlation_id,
+            )
+        try:
+            current = await run_in_threadpool(read_workspace)
+            replay = bool(current["sample_already_audited"])
+            history_snapshot = {"past_audits": current["past_audits"]}
+            previous = await run_in_threadpool(workspaces.read, workspace_id)
+            created = previous is None or previous.state is not DemoWorkspaceState.PREPARED
+            prepared_payload = _json_payload(
+                _prepared_demo_workspace(
+                    previous.payload if previous is not None else _empty_workspace(),
+                    replay=replay,
+                )
+            )
+            try:
+                prepared = await run_in_threadpool(
+                    workspaces.prepare,
+                    workspace_id,
+                    prepared_payload,
+                )
+            except DemoWorkspaceBusyError:
                 return JSONResponse(
                     status_code=409,
                     content={"detail": "audit_in_progress"},
                 )
-            created = demo_state != "prepared"
-            workspace_state = _prepared_demo_workspace(
-                workspace_state,
-                replay=replay,
+            workspace = _workspace_view(
+                prepared.payload,
+                history_snapshot,
+                prepared.state.value,
             )
-            demo_state = "prepared"
-            workspace = _workspace_view(workspace_state, history_snapshot, demo_state)
-        return JSONResponse(
-            status_code=201 if created else 200,
-            content=_json_payload(workspace),
-        )
+            return JSONResponse(
+                status_code=201 if created else 200,
+                content=_json_payload(workspace),
+            )
+        finally:
+            await run_in_threadpool(
+                release_provider_lease,
+                limiter,
+                admission.lease,
+                request.state.correlation_id,
+            )
 
     @app.get("/demo/workspace", tags=["demo"])
     async def demo_workspace() -> JSONResponse:
@@ -513,6 +871,51 @@ def _log_level() -> int:
     return value if isinstance(value, int) else logging.INFO
 
 
+def _startup_readiness_check_enabled() -> bool:
+    value = os.getenv("HINDSIGHT_STARTUP_READINESS_CHECK", "false").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"", "0", "false", "no", "off"}:
+        return False
+    raise ValueError("HINDSIGHT_STARTUP_READINESS_CHECK must be true or false")
+
+
+def _workspace_admission_response(admission: object, correlation_id: str) -> JSONResponse:
+    if getattr(admission, "policy_id", "") == "demo-workspace-execution" and not getattr(
+        admission, "unavailable", False
+    ):
+        headers = {**getattr(admission, "headers", {}), "Cache-Control": "no-store"}
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "audit_in_progress"},
+            headers=headers,
+        )
+    return provider_admission_response(admission, correlation_id)
+
+
+def _requires_api_auth(path: str) -> bool:
+    return path not in PUBLIC_PATHS and not path.startswith(PUBLIC_PATH_PREFIXES)
+
+
+def _normalized_request_path(path: object) -> str:
+    """Return a stable, non-user-controlled route label for structured logs."""
+
+    if not isinstance(path, str):
+        return "/{other}"
+    if path in STABLE_REQUEST_PATHS:
+        return path
+    if path.startswith("/assets/"):
+        return "/assets/{asset}"
+    decision_match = DECISION_REQUEST_PATH_PATTERN.fullmatch(path)
+    if decision_match is not None:
+        return f"/decisions/{{uuid}}{decision_match.group('suffix') or ''}"
+    return "/{other}"
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def _configured_reset_token() -> str | None:
     token = os.getenv("HINDSIGHT_DEMO_RESET_TOKEN")
     return token if token and token.strip() else None
@@ -522,18 +925,34 @@ def _valid_reset_token(expected: str, supplied: str) -> bool:
     return compare_digest(expected.encode("utf-8"), supplied.encode("utf-8"))
 
 
-def _demo_resetter(database_url: str | None) -> DemoResetter:
+def _demo_resetter(
+    database_url: str | None,
+    *,
+    connection_context_factory: Callable[[], AbstractContextManager[object]] | None = None,
+) -> DemoResetter:
     if not database_url:
         return lambda: None
-    return lambda: _database_demo_reset(database_url)
+    return lambda: _database_demo_reset(
+        database_url,
+        connection_context_factory=connection_context_factory,
+    )
 
 
-def _database_demo_reset(database_url: str) -> None:
+def _database_demo_reset(
+    database_url: str,
+    *,
+    connection_context_factory: Callable[[], AbstractContextManager[object]] | None = None,
+) -> None:
     operations = _demo_reset_operations()
     for attempt in range(4):
         try:
+            context = (
+                connection_context_factory()
+                if connection_context_factory is not None
+                else connect_database(database_url)
+            )
             with (
-                connect_database(database_url) as connection,
+                context as connection,
                 connection.transaction(),
             ):
                 for sql, params in operations:
@@ -605,8 +1024,15 @@ def _json_payload(payload: dict[str, object]) -> dict[str, object]:
 def _database_decision(
     database_url: str,
     decision_id: UUID,
+    *,
+    connection_context_factory: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> dict[str, object] | None:
-    with connect_database(database_url) as connection:
+    context = (
+        connection_context_factory()
+        if connection_context_factory is not None
+        else connect_database(database_url)
+    )
+    with context as connection:
         row = connection.execute(DECISION_API_SQL, (decision_id,)).fetchone()
         if row is None:
             return None
@@ -796,12 +1222,33 @@ def _prepared_demo_workspace(
     }
 
 
+def _reported_incident(payload: dict[str, object]) -> dict[str, object] | None:
+    """Return the incident a claimed workspace can be audited against, if it has one."""
+
+    incidents = payload.get("reported_incidents")
+    if not isinstance(incidents, list) or not incidents:
+        return None
+    incident = _mapping(incidents[0])
+    if incident.get("subject_id") is None or incident.get("case_id") is None:
+        return None
+    return incident
+
+
 def _empty_workspace() -> dict[str, object]:
     return {"reported_incidents": [], "past_audits": []}
 
 
-def _database_workspace(database_url: str) -> dict[str, object]:
-    with connect_database(database_url) as connection:
+def _database_workspace(
+    database_url: str,
+    *,
+    connection_context_factory: Callable[[], AbstractContextManager[object]] | None = None,
+) -> dict[str, object]:
+    context = (
+        connection_context_factory()
+        if connection_context_factory is not None
+        else connect_database(database_url)
+    )
+    with context as connection:
         audits = connection.execute(AUDITS_SQL).fetchall()
     return {
         "reported_incidents": [],

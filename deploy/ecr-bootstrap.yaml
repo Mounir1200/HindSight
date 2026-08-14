@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Bootstrap the private ECR repository used by the HindSight web service
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Default: hindsight-web
+    MinLength: 2
+    MaxLength: 256
+    AllowedPattern: "^[a-z0-9]+(?:[._/-][a-z0-9]+)*$"
+    Description: Private ECR repository name
+
+Resources:
+  WebRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      EmptyOnDelete: false
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Delete untagged images after seven days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Retain the twenty newest tagged images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPatternList": ["*"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: managed-by
+          Value: cloudformation
+
+Outputs:
+  RepositoryArn:
+    Description: ARN of the private web image repository
+    Value: !GetAtt WebRepository.Arn
+  RepositoryName:
+    Description: Name used by Docker and ECR commands
+    Value: !Ref WebRepository
+  RepositoryUri:
+    Description: Repository URI to combine with an immutable image digest
+    Value: !GetAtt WebRepository.RepositoryUri

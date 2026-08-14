@@ -215,6 +215,7 @@ class CockroachTelecomVectorMemoryStore:
                     content_sha256,
                     embedded_at,
                     values,
+                    error,
                 )
 
     def _store_once(self, values: tuple[object, ...]) -> MemoryEmbeddingReceipt:
@@ -294,11 +295,12 @@ class CockroachTelecomVectorMemoryStore:
         content_sha256: str,
         embedded_at: datetime,
         values: tuple[object, ...],
+        cause: Exception,
     ) -> MemoryEmbeddingReceipt:
         if self._connection_factory is None:
-            raise VectorMemoryStateError(
+            raise VectorMemoryAmbiguousCommitError(
                 "embedding commit outcome is unknown; retry with a fresh connection"
-            )
+            ) from cause
         with self._connection_factory() as connection:
             repository = CockroachTelecomVectorMemoryStore(
                 connection,
@@ -372,3 +374,7 @@ class MemoryEmbeddingNotFoundError(LookupError):
 
 class VectorMemoryStateError(RuntimeError):
     pass
+
+
+class VectorMemoryAmbiguousCommitError(VectorMemoryStateError):
+    """The embedding commit outcome must be checked on a fresh connection."""

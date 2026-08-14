@@ -1,0 +1,1321 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Secure public HindSight service on Amazon ECS Express Mode
+
+Metadata:
+  # Optional secret/model ARN parameters are empty only while their owning feature
+  # condition is false. CloudFormation Rules reject those empty values when enabled.
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W1030
+        - W1033
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Release
+        Parameters:
+          - EnvironmentName
+          - DeploymentProfile
+          - ImageIdentifier
+          - MinTaskCount
+          - MaxTaskCount
+          - AutoScalingMetric
+          - AutoScalingTargetValue
+      - Label:
+          default: Runtime secrets
+        Parameters:
+          - DatabaseSecretArn
+          - ApplicationApiKeySecretArn
+          - SecretsKmsKeyArn
+          - DemoResetTokenSecretArn
+          - McpApiKeySecretArn
+      - Label:
+          default: Optional providers
+        Parameters:
+          - BedrockEnabled
+          - VectorEnabled
+          - McpEnabled
+          - BedrockModelId
+          - EmbeddingModelId
+          - BedrockResourceArns
+          - McpClusterId
+      - Label:
+          default: Public protection and operations
+        Parameters:
+          - ManagedRulesMode
+          - WafAllRequestsPerMinute
+          - WafExpensiveRequestsPerMinute
+          - WafExpensiveGlobalPerMinute
+          - LogRetentionDays
+          - AlertEmail
+          - DatabasePoolMinSize
+          - DatabasePoolMaxSize
+          - RateLimitPoolMaxSize
+          - RateLimitScale
+          - ProviderConcurrency
+          - ServerLimitConcurrency
+          - ServerBacklog
+          - EnhancedObservability
+      - Label:
+          default: Dedicated network
+        Parameters:
+          - VpcCidr
+          - PublicSubnetOneCidr
+          - PublicSubnetTwoCidr
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: hackathon
+    MinLength: 2
+    MaxLength: 24
+    AllowedPattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
+    Description: Short environment suffix used for the ECS Express service
+  DeploymentProfile:
+    Type: String
+    Default: showcase
+    AllowedValues: [showcase, production]
+    Description: Showcase defaults to one bounded-cost task; production requires at least two tasks
+  ImageIdentifier:
+    Type: String
+    MinLength: 80
+    MaxLength: 512
+    AllowedPattern: "^\\S+@sha256:[0-9a-f]{64}$"
+    ConstraintDescription: Use an immutable ECR image URI ending in @sha256:<64 lowercase hex characters>
+    Description: Immutable ECR image URI pinned by digest
+  DatabaseSecretArn:
+    Type: String
+    MinLength: 20
+    MaxLength: 512
+    AllowedPattern: "^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$"
+    Description: Secrets Manager ARN whose full secret value is the runtime DATABASE_URL
+  ApplicationApiKeySecretArn:
+    Type: String
+    Default: ""
+    MaxLength: 512
+    AllowedPattern: "^$|^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$"
+    Description: Secrets Manager ARN whose full value is HINDSIGHT_API_KEY; required in production
+  SecretsKmsKeyArn:
+    Type: String
+    Default: ""
+    MaxLength: 512
+    AllowedPattern: "^$|^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[A-Za-z0-9-]+$"
+    Description: Optional customer-managed KMS key ARN used by the supplied runtime secrets
+  DemoResetTokenSecretArn:
+    Type: String
+    Default: ""
+    MaxLength: 512
+    AllowedPattern: "^$|^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$"
+    Description: Optional Secrets Manager ARN whose full value enables POST /demo/reset
+  McpApiKeySecretArn:
+    Type: String
+    Default: ""
+    MaxLength: 512
+    AllowedPattern: "^$|^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$"
+    Description: Secrets Manager ARN whose full value is COCKROACH_MCP_API_KEY
+  BedrockModelId:
+    Type: String
+    Default: ""
+    MaxLength: 512
+    Description: Tool-capable Bedrock model or inference profile ID
+  EmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
+    MinLength: 1
+    MaxLength: 512
+    Description: Bedrock embedding model ID used by vector memory
+  BedrockResourceArns:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    AllowedPattern: "^$|^arn:[^\\s,*?]+(?:,arn:[^\\s,*?]+)*$"
+    ConstraintDescription: Supply exact comma-separated ARNs without whitespace or the wildcards * and ?
+    Description: Comma-separated exact model and inference-profile ARNs allowed for InvokeModel, without spaces or wildcards
+  McpClusterId:
+    Type: String
+    Default: ""
+    MaxLength: 36
+    AllowedPattern: "^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    Description: CockroachDB Cloud cluster ID used by the managed MCP server
+  BedrockEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  VectorEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  McpEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  ManagedRulesMode:
+    Type: String
+    Default: BLOCK
+    AllowedValues: [BLOCK, COUNT]
+    Description: Enforcement mode for AWS managed WAF rule groups; rate rules always block
+  WafAllRequestsPerMinute:
+    Type: Number
+    Default: 300
+    MinValue: 10
+    MaxValue: 2000
+  WafExpensiveRequestsPerMinute:
+    Type: Number
+    Default: 10
+    MinValue: 10
+    MaxValue: 100
+  WafExpensiveGlobalPerMinute:
+    Type: Number
+    Default: 120
+    MinValue: 10
+    MaxValue: 1000
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+  AlertEmail:
+    Type: String
+    Default: ""
+    MaxLength: 320
+    Description: Optional email address that must confirm the SNS subscription
+  MinTaskCount:
+    Type: Number
+    Default: 1
+    AllowedValues: [1, 2, 4, 8]
+    Description: Minimum running ECS tasks; production deployments must override this to at least two
+  MaxTaskCount:
+    Type: Number
+    Default: 1
+    AllowedValues: [1, 2, 4, 8, 16, 20]
+    Description: Maximum autoscaled ECS tasks; the showcase default stays fixed at one
+  AutoScalingMetric:
+    Type: String
+    Default: REQUEST_COUNT_PER_TARGET
+    AllowedValues: [AVERAGE_CPU, AVERAGE_MEMORY, REQUEST_COUNT_PER_TARGET]
+    Description: Express target-tracking metric; request count suits the I/O-heavy API default
+  AutoScalingTargetValue:
+    Type: Number
+    Default: 300
+    MinValue: 10
+    MaxValue: 1000
+    Description: Target value for the selected Express autoscaling metric
+  DatabasePoolMinSize:
+    Type: Number
+    Default: 0
+    AllowedValues: [0, 1, 2, 5, 10]
+    Description: Lazy CockroachDB connections kept ready by each ECS task
+  DatabasePoolMaxSize:
+    Type: Number
+    Default: 5
+    AllowedValues: [1, 2, 5, 10, 20]
+    Description: Hard CockroachDB business-connection ceiling per ECS task
+  RateLimitPoolMaxSize:
+    Type: Number
+    Default: 5
+    AllowedValues: [1, 2, 5, 10, 20]
+    Description: Hard CockroachDB rate-limit connection ceiling per ECS task
+  RateLimitScale:
+    Type: String
+    Default: "1"
+    AllowedValues: ["0.1", "0.25", "0.5", "1", "2", "5", "10"]
+    Description: Multiplier for application request and provider budgets; showcase is fixed at one
+  ProviderConcurrency:
+    Type: Number
+    Default: 4
+    AllowedValues: [1, 2, 4, 8, 16, 32, 64]
+    Description: Shared CockroachDB-backed provider execution slots across all ECS tasks
+  EnhancedObservability:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Enables Container Insights and the paid CloudWatch operations dashboard
+  ServerLimitConcurrency:
+    Type: Number
+    Default: 256
+    AllowedValues: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+    Description: Per-task Uvicorn concurrency ceiling for overload backpressure
+  ServerBacklog:
+    Type: Number
+    Default: 512
+    AllowedValues: [64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    Description: Per-task bounded socket accept backlog
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+    AllowedPattern: "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/(?:1[6-9]|2[0-8])$"
+  PublicSubnetOneCidr:
+    Type: String
+    Default: 10.42.0.0/24
+    AllowedPattern: "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/(?:2[4-8])$"
+  PublicSubnetTwoCidr:
+    Type: String
+    Default: 10.42.1.0/24
+    AllowedPattern: "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/(?:2[4-8])$"
+
+Conditions:
+  UseMcp: !Equals [!Ref McpEnabled, "true"]
+  UseApplicationAuth: !Not [!Equals [!Ref ApplicationApiKeySecretArn, ""]]
+  UseAwsProviders: !Or
+    - !Equals [!Ref BedrockEnabled, "true"]
+    - !Equals [!Ref VectorEnabled, "true"]
+  UseDemoReset: !Not [!Equals [!Ref DemoResetTokenSecretArn, ""]]
+  UseCustomSecretsKmsKey: !Not [!Equals [!Ref SecretsKmsKeyArn, ""]]
+  UseAlerts: !Not [!Equals [!Ref AlertEmail, ""]]
+  UseEnhancedObservability: !Equals [!Ref EnhancedObservability, "true"]
+  CountManagedRules: !Equals [!Ref ManagedRulesMode, COUNT]
+
+Rules:
+  BedrockConfiguration:
+    RuleCondition: !Equals [!Ref BedrockEnabled, "true"]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref BedrockModelId, ""]]
+        AssertDescription: BedrockModelId is required when BedrockEnabled is true
+  ProviderAuthorization:
+    RuleCondition: !Or
+      - !Equals [!Ref BedrockEnabled, "true"]
+      - !Equals [!Ref VectorEnabled, "true"]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref BedrockResourceArns, ""]]
+        AssertDescription: BedrockResourceArns is required when Bedrock or vector retrieval is enabled
+  McpConfiguration:
+    RuleCondition: !Equals [!Ref McpEnabled, "true"]
+    Assertions:
+      - Assert: !Equals [!Ref BedrockEnabled, "true"]
+        AssertDescription: MCP requires BedrockEnabled
+      - Assert: !Not [!Equals [!Ref McpClusterId, ""]]
+        AssertDescription: McpClusterId is required when McpEnabled is true
+      - Assert: !Not [!Equals [!Ref McpApiKeySecretArn, ""]]
+        AssertDescription: McpApiKeySecretArn is required when McpEnabled is true
+  ProductionAvailability:
+    RuleCondition: !Equals [!Ref DeploymentProfile, production]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref MinTaskCount, "1"]]
+        AssertDescription: Production requires MinTaskCount of at least two
+      - Assert: !Not [!Equals [!Ref MaxTaskCount, "1"]]
+        AssertDescription: Production requires MaxTaskCount of at least two
+  ProductionAuthentication:
+    RuleCondition: !Equals [!Ref DeploymentProfile, production]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ApplicationApiKeySecretArn, ""]]
+        AssertDescription: Production requires ApplicationApiKeySecretArn
+      - Assert: !Equals [!Ref EnhancedObservability, "true"]
+        AssertDescription: Production requires EnhancedObservability for capacity and latency evidence
+  ShowcaseCapacity:
+    RuleCondition: !Equals [!Ref DeploymentProfile, showcase]
+    Assertions:
+      - Assert: !Equals [!Ref MinTaskCount, "1"]
+        AssertDescription: Showcase fixes MinTaskCount at one to bound idle cost
+      - Assert: !Equals [!Ref MaxTaskCount, "1"]
+        AssertDescription: Showcase fixes MaxTaskCount at one to bound scale cost
+      - Assert: !Equals [!Ref DatabasePoolMinSize, "0"]
+        AssertDescription: Showcase keeps the business pool lazy
+      - Assert: !Equals [!Ref DatabasePoolMaxSize, "5"]
+        AssertDescription: Showcase fixes the business pool ceiling at five
+      - Assert: !Equals [!Ref RateLimitPoolMaxSize, "5"]
+        AssertDescription: Showcase fixes the rate-limit pool ceiling at five
+      - Assert: !Equals [!Ref RateLimitScale, "1"]
+        AssertDescription: Showcase fixes request and provider budgets at the reviewed scale
+      - Assert: !Equals [!Ref ProviderConcurrency, "4"]
+        AssertDescription: Showcase fixes global provider concurrency at four
+  TaskRangeMinimumTwo:
+    RuleCondition: !Equals [!Ref MinTaskCount, "2"]
+    Assertions:
+      - Assert:
+          Fn::Contains:
+            - ["2", "4", "8", "16", "20"]
+            - !Ref MaxTaskCount
+        AssertDescription: MaxTaskCount must be greater than or equal to MinTaskCount
+  TaskRangeMinimumFour:
+    RuleCondition: !Equals [!Ref MinTaskCount, "4"]
+    Assertions:
+      - Assert:
+          Fn::Contains:
+            - ["4", "8", "16", "20"]
+            - !Ref MaxTaskCount
+        AssertDescription: MaxTaskCount must be greater than or equal to MinTaskCount
+  TaskRangeMinimumEight:
+    RuleCondition: !Equals [!Ref MinTaskCount, "8"]
+    Assertions:
+      - Assert:
+          Fn::Contains:
+            - ["8", "16", "20"]
+            - !Ref MaxTaskCount
+        AssertDescription: MaxTaskCount must be greater than or equal to MinTaskCount
+  DatabasePoolRangeMinimumTwo:
+    RuleCondition: !Equals [!Ref DatabasePoolMinSize, "2"]
+    Assertions:
+      - Assert:
+          Fn::Contains:
+            - ["2", "5", "10", "20"]
+            - !Ref DatabasePoolMaxSize
+        AssertDescription: DatabasePoolMaxSize must be at least DatabasePoolMinSize
+  DatabasePoolRangeMinimumFive:
+    RuleCondition: !Equals [!Ref DatabasePoolMinSize, "5"]
+    Assertions:
+      - Assert:
+          Fn::Contains:
+            - ["5", "10", "20"]
+            - !Ref DatabasePoolMaxSize
+        AssertDescription: DatabasePoolMaxSize must be at least DatabasePoolMinSize
+  DatabasePoolRangeMinimumTen:
+    RuleCondition: !Equals [!Ref DatabasePoolMinSize, "10"]
+    Assertions:
+      - Assert:
+          Fn::Contains:
+            - ["10", "20"]
+            - !Ref DatabasePoolMaxSize
+        AssertDescription: DatabasePoolMaxSize must be at least DatabasePoolMinSize
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-igw"
+        - Key: project
+          Value: hindsight
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public"
+        - Key: project
+          Value: hindsight
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnetOneCidr
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-a"
+        - Key: project
+          Value: hindsight
+
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnetTwoCidr
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-b"
+        - Key: project
+          Value: hindsight
+
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetOne
+
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetTwo
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings:
+        - Name: containerInsights
+          Value: !If [UseEnhancedObservability, enabled, disabled]
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/ecs/hindsight/${EnvironmentName}/${AWS::StackName}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  RateLimitHmacSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "HindSight ${EnvironmentName} rate-limit identity HMAC key"
+      GenerateSecretString:
+        ExcludePunctuation: true
+        IncludeSpace: false
+        PasswordLength: 64
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      Policies:
+        - PolicyName: read-declared-runtime-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadRuntimeSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref DatabaseSecretArn
+                  - !Ref RateLimitHmacSecret
+                  - !If
+                    - UseApplicationAuth
+                    - !Ref ApplicationApiKeySecretArn
+                    - !Ref "AWS::NoValue"
+                  - !If [UseMcp, !Ref McpApiKeySecretArn, !Ref "AWS::NoValue"]
+                  - !If [UseDemoReset, !Ref DemoResetTokenSecretArn, !Ref "AWS::NoValue"]
+              - !If
+                - UseCustomSecretsKmsKey
+                - Sid: DecryptRuntimeSecrets
+                  Effect: Allow
+                  Action: kms:Decrypt
+                  Resource: !Ref SecretsKmsKeyArn
+                  Condition:
+                    StringEquals:
+                      kms:ViaService: !Sub "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                - !Ref "AWS::NoValue"
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  InfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEcsExpressInfrastructure
+            Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices"
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  RuntimeTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  BedrockInvokePolicy:
+    Type: AWS::IAM::Policy
+    Condition: UseAwsProviders
+    Properties:
+      PolicyName: invoke-declared-bedrock-resources
+      Roles:
+        - !Ref RuntimeTaskRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InvokeDeclaredModels
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:GetInferenceProfile
+            Resource: !Split [",", !Ref BedrockResourceArns]
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Condition: UseAlerts
+    Properties:
+      DisplayName: HindSight operational alerts
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: UseAlerts
+    Properties:
+      Endpoint: !Ref AlertEmail
+      Protocol: email
+      TopicArn: !Ref AlertTopic
+
+  Service:
+    Type: AWS::ECS::ExpressGatewayService
+    DependsOn:
+      - PublicDefaultRoute
+      - PublicSubnetOneRouteTableAssociation
+      - PublicSubnetTwoRouteTableAssociation
+    Properties:
+      Cluster: !Ref Cluster
+      Cpu: "1024"
+      Memory: "2048"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      InfrastructureRoleArn: !GetAtt InfrastructureRole.Arn
+      TaskRoleArn: !GetAtt RuntimeTaskRole.Arn
+      HealthCheckPath: /health
+      NetworkConfiguration:
+        Subnets:
+          - !Ref PublicSubnetOne
+          - !Ref PublicSubnetTwo
+      PrimaryContainer:
+        Image: !Ref ImageIdentifier
+        ContainerPort: 8000
+        AwsLogsConfiguration:
+          LogGroup: !Ref ApplicationLogGroup
+          LogStreamPrefix: web
+        Environment:
+          - Name: HOST
+            Value: 0.0.0.0
+          - Name: PORT
+            Value: "8000"
+          - Name: LOG_LEVEL
+            Value: INFO
+          - Name: AWS_REGION
+            Value: !Ref "AWS::Region"
+          - Name: HINDSIGHT_DEMO_BEDROCK
+            Value: !Ref BedrockEnabled
+          - Name: HINDSIGHT_DEMO_VECTOR
+            Value: !Ref VectorEnabled
+          - Name: HINDSIGHT_DEMO_MCP
+            Value: !Ref McpEnabled
+          - Name: BEDROCK_MODEL_ID
+            Value: !Ref BedrockModelId
+          - Name: BEDROCK_EMBEDDING_MODEL_ID
+            Value: !Ref EmbeddingModelId
+          - Name: COCKROACH_MCP_CLUSTER_ID
+            Value: !Ref McpClusterId
+          - Name: HINDSIGHT_RATE_LIMIT_ENABLED
+            Value: "true"
+          - Name: HINDSIGHT_RATE_LIMIT_BACKEND
+            Value: cockroach
+          - Name: HINDSIGHT_RATE_LIMIT_SCALE
+            Value: !Ref RateLimitScale
+          - Name: HINDSIGHT_RATE_LIMIT_MAX_LOCAL_BUCKETS
+            Value: "50000"
+          - Name: HINDSIGHT_RATE_LIMIT_TRUSTED_PROXY_HOPS
+            Value: "1"
+          - Name: HINDSIGHT_RATE_LIMIT_TRUSTED_PROXY_CIDRS
+            Value: !Ref VpcCidr
+          - Name: HINDSIGHT_RATE_LIMIT_TRUST_APP_RUNNER_XFF
+            Value: "false"
+          - Name: HINDSIGHT_DATABASE_POOL_MIN_SIZE
+            Value: !Ref DatabasePoolMinSize
+          - Name: HINDSIGHT_DATABASE_POOL_MAX_SIZE
+            Value: !Ref DatabasePoolMaxSize
+          - Name: HINDSIGHT_DATABASE_POOL_TIMEOUT_SECONDS
+            Value: "2"
+          - Name: HINDSIGHT_DATABASE_POOL_MAX_LIFETIME_SECONDS
+            Value: "900"
+          - Name: HINDSIGHT_RATE_LIMIT_POOL_MAX_SIZE
+            Value: !Ref RateLimitPoolMaxSize
+          - Name: HINDSIGHT_PROVIDER_CONCURRENCY
+            Value: !Ref ProviderConcurrency
+          - Name: HINDSIGHT_SERVER_LIMIT_CONCURRENCY
+            Value: !Ref ServerLimitConcurrency
+          - Name: HINDSIGHT_SERVER_BACKLOG
+            Value: !Ref ServerBacklog
+          - Name: HINDSIGHT_SERVER_KEEP_ALIVE_SECONDS
+            Value: "5"
+          - Name: HINDSIGHT_SERVER_GRACEFUL_SHUTDOWN_SECONDS
+            Value: "120"
+          - Name: HINDSIGHT_STARTUP_READINESS_CHECK
+            Value: "true"
+        Secrets:
+          - Name: DATABASE_URL
+            ValueFrom: !Ref DatabaseSecretArn
+          - Name: HINDSIGHT_RATE_LIMIT_HMAC_KEY
+            ValueFrom: !Ref RateLimitHmacSecret
+          - !If
+            - UseApplicationAuth
+            - Name: HINDSIGHT_API_KEY
+              ValueFrom: !Ref ApplicationApiKeySecretArn
+            - !Ref "AWS::NoValue"
+          - !If
+            - UseMcp
+            - Name: COCKROACH_MCP_API_KEY
+              ValueFrom: !Ref McpApiKeySecretArn
+            - !Ref "AWS::NoValue"
+          - !If
+            - UseDemoReset
+            - Name: HINDSIGHT_DEMO_RESET_TOKEN
+              ValueFrom: !Ref DemoResetTokenSecretArn
+            - !Ref "AWS::NoValue"
+      ScalingTarget:
+        AutoScalingMetric: !Ref AutoScalingMetric
+        AutoScalingTargetValue: !Ref AutoScalingTargetValue
+        MinTaskCount: !Ref MinTaskCount
+        MaxTaskCount: !Ref MaxTaskCount
+      ServiceName: !Sub "hindsight-${EnvironmentName}"
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+        - Key: deployment-profile
+          Value: !Ref DeploymentProfile
+        - Key: managed-by
+          Value: cloudformation
+
+  PublicWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      CustomResponseBodies:
+        RateLimitExceeded:
+          Content: '{"detail":"rate_limit_exceeded","source":"aws_waf"}'
+          ContentType: APPLICATION_JSON
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "hindsight-${EnvironmentName}-public-edge"
+        SampledRequestsEnabled: false
+      Rules:
+        - Name: aws-ip-reputation
+          Priority: 0
+          OverrideAction: !If
+            - CountManagedRules
+            - Count: {}
+            - None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "hindsight-${EnvironmentName}-ip-reputation"
+            SampledRequestsEnabled: false
+        - Name: aws-common-protections
+          Priority: 1
+          OverrideAction: !If
+            - CountManagedRules
+            - Count: {}
+            - None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "hindsight-${EnvironmentName}-common"
+            SampledRequestsEnabled: false
+        - Name: aws-known-bad-inputs
+          Priority: 2
+          OverrideAction: !If
+            - CountManagedRules
+            - Count: {}
+            - None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "hindsight-${EnvironmentName}-known-bad-inputs"
+            SampledRequestsEnabled: false
+        - Name: expensive-routes-per-ip
+          Priority: 3
+          Action:
+            Block:
+              CustomResponse:
+                CustomResponseBodyKey: RateLimitExceeded
+                ResponseCode: 429
+                ResponseHeaders:
+                  - Name: Retry-After
+                    Value: "60"
+                  - Name: RateLimit-Limit
+                    Value: !Ref WafExpensiveRequestsPerMinute
+                  - Name: RateLimit-Remaining
+                    Value: "0"
+                  - Name: RateLimit-Reset
+                    Value: "60"
+                  - Name: Cache-Control
+                    Value: no-store
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              Limit: !Ref WafExpensiveRequestsPerMinute
+              EvaluationWindowSec: 60
+              ScopeDownStatement:
+                OrStatement:
+                  Statements:
+                    - AndStatement:
+                        Statements:
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                Method: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: POST
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: NONE
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                UriPath: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: /demo/seed
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: URL_DECODE
+                                - Priority: 1
+                                  Type: NORMALIZE_PATH
+                    - AndStatement:
+                        Statements:
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                Method: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: GET
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: NONE
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                UriPath: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: /memories/search
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: URL_DECODE
+                                - Priority: 1
+                                  Type: NORMALIZE_PATH
+                    - AndStatement:
+                        Statements:
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                Method: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: POST
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: NONE
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                UriPath: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: /demo/reset
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: URL_DECODE
+                                - Priority: 1
+                                  Type: NORMALIZE_PATH
+                    - AndStatement:
+                        Statements:
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                Method: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: POST
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: NONE
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                UriPath: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: /demo/prepare
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: URL_DECODE
+                                - Priority: 1
+                                  Type: NORMALIZE_PATH
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "hindsight-${EnvironmentName}-expensive"
+            SampledRequestsEnabled: false
+        - Name: expensive-routes-global
+          Priority: 4
+          Action:
+            Block:
+              CustomResponse:
+                CustomResponseBodyKey: RateLimitExceeded
+                ResponseCode: 429
+                ResponseHeaders:
+                  - Name: Retry-After
+                    Value: "60"
+                  - Name: RateLimit-Limit
+                    Value: !Ref WafExpensiveGlobalPerMinute
+                  - Name: RateLimit-Remaining
+                    Value: "0"
+                  - Name: RateLimit-Reset
+                    Value: "60"
+                  - Name: Cache-Control
+                    Value: no-store
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: CONSTANT
+              Limit: !Ref WafExpensiveGlobalPerMinute
+              EvaluationWindowSec: 60
+              ScopeDownStatement:
+                OrStatement:
+                  Statements:
+                    - AndStatement:
+                        Statements:
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                Method: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: POST
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: NONE
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                UriPath: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: /demo/seed
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: URL_DECODE
+                                - Priority: 1
+                                  Type: NORMALIZE_PATH
+                    - AndStatement:
+                        Statements:
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                Method: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: GET
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: NONE
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                UriPath: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: /memories/search
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: URL_DECODE
+                                - Priority: 1
+                                  Type: NORMALIZE_PATH
+                    - AndStatement:
+                        Statements:
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                Method: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: POST
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: NONE
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                UriPath: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: /demo/reset
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: URL_DECODE
+                                - Priority: 1
+                                  Type: NORMALIZE_PATH
+                    - AndStatement:
+                        Statements:
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                Method: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: POST
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: NONE
+                          - ByteMatchStatement:
+                              FieldToMatch:
+                                UriPath: {}
+                              PositionalConstraint: EXACTLY
+                              SearchString: /demo/prepare
+                              TextTransformations:
+                                - Priority: 0
+                                  Type: URL_DECODE
+                                - Priority: 1
+                                  Type: NORMALIZE_PATH
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "hindsight-${EnvironmentName}-expensive-global"
+            SampledRequestsEnabled: false
+        - Name: all-traffic-per-ip
+          Priority: 5
+          Action:
+            Block:
+              CustomResponse:
+                CustomResponseBodyKey: RateLimitExceeded
+                ResponseCode: 429
+                ResponseHeaders:
+                  - Name: Retry-After
+                    Value: "60"
+                  - Name: RateLimit-Limit
+                    Value: !Ref WafAllRequestsPerMinute
+                  - Name: RateLimit-Remaining
+                    Value: "0"
+                  - Name: RateLimit-Reset
+                    Value: "60"
+                  - Name: Cache-Control
+                    Value: no-store
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              Limit: !Ref WafAllRequestsPerMinute
+              EvaluationWindowSec: 60
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "hindsight-${EnvironmentName}-all-traffic"
+            SampledRequestsEnabled: false
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  PublicWebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !GetAtt Service.ECSManagedResourceArns.IngressPath.LoadBalancerArn
+      WebACLArn: !GetAtt PublicWebAcl.Arn
+
+  PublicWebAclLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "aws-waf-logs-${AWS::StackName}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  PublicWebAclLogging:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt PublicWebAcl.Arn
+      LogDestinationConfigs:
+        - !Select [0, !Split [":*", !GetAtt PublicWebAclLogGroup.Arn]]
+      RedactedFields:
+        - QueryString: {}
+        - SingleHeader:
+            Name: authorization
+        - SingleHeader:
+            Name: cookie
+        - SingleHeader:
+            Name: x-demo-reset-token
+      LoggingFilter:
+        DefaultBehavior: DROP
+        Filters:
+          # COUNT and EXCLUDED_AS_COUNT make ManagedRulesMode=COUNT observable
+          # through these redacted logs. Sampled requests are deliberately left
+          # disabled: the console sample viewer does not apply RedactedFields,
+          # so enabling it would expose raw query strings and headers.
+          - Behavior: KEEP
+            Conditions:
+              - ActionCondition:
+                  Action: BLOCK
+              - ActionCondition:
+                  Action: COUNT
+              - ActionCondition:
+                  Action: EXCLUDED_AS_COUNT
+            Requirement: MEETS_ANY
+
+  TargetFiveXxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: UseEnhancedObservability
+    Properties:
+      AlarmDescription: HindSight target returned at least five 5xx responses in five minutes
+      AlarmActions: !If [UseAlerts, [!Ref AlertTopic], !Ref "AWS::NoValue"]
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Select
+            - 1
+            - !Split
+              - "loadbalancer/"
+              - !GetAtt Service.ECSManagedResourceArns.IngressPath.LoadBalancerArn
+        - Name: TargetGroup
+          Value: !Join
+            - ""
+            - - "targetgroup/"
+              - !Select
+                - 1
+                - !Split
+                  - "targetgroup/"
+                  - !Select [0, !GetAtt Service.ECSManagedResourceArns.IngressPath.TargetGroupArns]
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      MetricName: HTTPCode_Target_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Period: 300
+      Statistic: Sum
+      Threshold: 5
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  TargetLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: UseEnhancedObservability
+    Properties:
+      AlarmDescription: HindSight p95 target latency exceeded five seconds for three minutes
+      AlarmActions: !If [UseAlerts, [!Ref AlertTopic], !Ref "AWS::NoValue"]
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Select
+            - 1
+            - !Split
+              - "loadbalancer/"
+              - !GetAtt Service.ECSManagedResourceArns.IngressPath.LoadBalancerArn
+        - Name: TargetGroup
+          Value: !Join
+            - ""
+            - - "targetgroup/"
+              - !Select
+                - 1
+                - !Split
+                  - "targetgroup/"
+                  - !Select [0, !GetAtt Service.ECSManagedResourceArns.IngressPath.TargetGroupArns]
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      MetricName: TargetResponseTime
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      ExtendedStatistic: p95
+      Threshold: 5
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: project
+          Value: hindsight
+        - Key: environment
+          Value: !Ref EnvironmentName
+
+  OperationsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: UseEnhancedObservability
+    Properties:
+      DashboardName: !Sub "hindsight-${EnvironmentName}-${AWS::Region}-${AWS::StackName}"
+      DashboardBody: !Sub
+        - |
+          {
+            "start": "-PT6H",
+            "periodOverride": "inherit",
+            "widgets": [
+              {
+                "type": "text",
+                "x": 0,
+                "y": 0,
+                "width": 24,
+                "height": 2,
+                "properties": {
+                  "markdown": "# HindSight ${EnvironmentName}\nDeployment profile: **${DeploymentProfile}** - configured task range: **${MinTaskCount}-${MaxTaskCount}**"
+                }
+              },
+              {
+                "type": "metric",
+                "x": 0,
+                "y": 2,
+                "width": 12,
+                "height": 6,
+                "properties": {
+                  "title": "Requests and HTTP errors",
+                  "region": "${AWS::Region}",
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "period": 60,
+                  "stat": "Sum",
+                  "metrics": [
+                    ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${LoadBalancerDimension}", {"label": "Requests"}],
+                    [".", "HTTPCode_Target_4XX_Count", ".", ".", {"label": "Target 4xx"}],
+                    [".", "HTTPCode_ELB_4XX_Count", ".", ".", {"label": "ALB 4xx"}],
+                    [".", "HTTPCode_Target_5XX_Count", ".", ".", {"label": "Target 5xx"}],
+                    [".", "HTTPCode_ELB_5XX_Count", ".", ".", {"label": "ALB 5xx"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric",
+                "x": 12,
+                "y": 2,
+                "width": 12,
+                "height": 6,
+                "properties": {
+                  "title": "Target latency percentiles",
+                  "region": "${AWS::Region}",
+                  "view": "timeSeries",
+                  "period": 60,
+                  "yAxis": {"left": {"min": 0, "label": "seconds"}},
+                  "metrics": [
+                    ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${LoadBalancerDimension}", "TargetGroup", "${TargetGroupDimension}", {"stat": "p95", "label": "p95"}],
+                    [".", ".", ".", ".", ".", ".", {"stat": "p99", "label": "p99"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric",
+                "x": 0,
+                "y": 8,
+                "width": 12,
+                "height": 6,
+                "properties": {
+                  "title": "ECS utilization",
+                  "region": "${AWS::Region}",
+                  "view": "timeSeries",
+                  "period": 60,
+                  "stat": "Average",
+                  "yAxis": {"left": {"min": 0, "max": 100, "label": "percent"}},
+                  "metrics": [
+                    ["AWS/ECS", "CPUUtilization", "ClusterName", "${ClusterName}", "ServiceName", "${ServiceName}", {"label": "CPU"}],
+                    [".", "MemoryUtilization", ".", ".", ".", ".", {"label": "Memory"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric",
+                "x": 12,
+                "y": 8,
+                "width": 12,
+                "height": 6,
+                "properties": {
+                  "title": "Task and target capacity",
+                  "region": "${AWS::Region}",
+                  "view": "timeSeries",
+                  "period": 60,
+                  "stat": "Average",
+                  "metrics": [
+                    ["ECS/ContainerInsights", "DesiredTaskCount", "ClusterName", "${ClusterName}", "ServiceName", "${ServiceName}", {"label": "Desired tasks"}],
+                    [".", "RunningTaskCount", ".", ".", ".", ".", {"label": "Running tasks"}],
+                    ["AWS/ApplicationELB", "HealthyHostCount", "LoadBalancer", "${LoadBalancerDimension}", "TargetGroup", "${TargetGroupDimension}", {"label": "Healthy targets"}],
+                    [".", "UnHealthyHostCount", ".", ".", ".", ".", {"label": "Unhealthy targets"}]
+                  ]
+                }
+              }
+            ]
+          }
+        - LoadBalancerDimension: !Select
+            - 1
+            - !Split
+              - "loadbalancer/"
+              - !GetAtt Service.ECSManagedResourceArns.IngressPath.LoadBalancerArn
+          TargetGroupDimension: !Join
+            - ""
+            - - "targetgroup/"
+              - !Select
+                - 1
+                - !Split
+                  - "targetgroup/"
+                  - !Select [0, !GetAtt Service.ECSManagedResourceArns.IngressPath.TargetGroupArns]
+          ClusterName: !Ref Cluster
+          ServiceName: !Sub "hindsight-${EnvironmentName}"
+
+Outputs:
+  DeploymentProfile:
+    Description: Selected cost and availability profile
+    Value: !Ref DeploymentProfile
+  OperationsDashboardName:
+    Description: CloudWatch dashboard for traffic, latency, errors, and service capacity
+    Condition: UseEnhancedObservability
+    Value: !Ref OperationsDashboard
+  ApplicationLogGroup:
+    Description: CloudWatch log group for structured HindSight request logs
+    Value: !Ref ApplicationLogGroup
+  ClusterName:
+    Value: !Ref Cluster
+  InfrastructureRoleArn:
+    Value: !GetAtt InfrastructureRole.Arn
+  LoadBalancerArn:
+    Value: !GetAtt Service.ECSManagedResourceArns.IngressPath.LoadBalancerArn
+  RateLimitHmacSecretArn:
+    Description: Generated secret ARN; the secret value is never returned
+    Value: !Ref RateLimitHmacSecret
+  RuntimeTaskRoleArn:
+    Value: !GetAtt RuntimeTaskRole.Arn
+  ServiceArn:
+    Value: !GetAtt Service.ServiceArn
+  ServiceEndpoint:
+    Description: Public HTTPS endpoint created by ECS Express Mode
+    Value: !GetAtt Service.Endpoint
+  TaskExecutionRoleArn:
+    Value: !GetAtt TaskExecutionRole.Arn
+  TargetGroupArn:
+    Value: !Select [0, !GetAtt Service.ECSManagedResourceArns.IngressPath.TargetGroupArns]
+  VpcId:
+    Description: Dedicated VPC; do not place unrelated Express services here because the ALB can be shared
+    Value: !Ref Vpc
+  WebAclArn:
+    Value: !GetAtt PublicWebAcl.Arn
+  WebAclLogGroup:
+    Value: !Ref PublicWebAclLogGroup

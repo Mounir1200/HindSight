@@ -4,7 +4,11 @@
 .pytest_cache/
 .ruff_cache/
 .uv-cache/
+.uv-cache-build/
+.uv-cache-ruff/
 .venv/
+.test-tmp/
+dist/
 __pycache__/
 *.py[cod]
 cahier_des_charges_hindsight.md

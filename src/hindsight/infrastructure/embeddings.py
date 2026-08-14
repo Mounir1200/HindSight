@@ -2,9 +2,12 @@ import json
 from typing import Any
 
 from hindsight.core.memory import MEMORY_EMBEDDING_DIMENSIONS, TextEmbedding
+from hindsight.infrastructure.bedrock import bedrock_client_config
+from hindsight.telemetry import current_performance_span
 
 DEFAULT_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 MAX_EMBEDDING_TEXT_CHARS = 50_000
+EMBEDDING_READ_TIMEOUT_SECONDS = 15
 
 
 class BedrockTitanTextEmbedder:
@@ -25,7 +28,11 @@ class BedrockTitanTextEmbedder:
             try:
                 import boto3
 
-                client = boto3.client("bedrock-runtime", region_name=region_name)
+                client = boto3.client(
+                    "bedrock-runtime",
+                    region_name=region_name,
+                    config=bedrock_client_config(EMBEDDING_READ_TIMEOUT_SECONDS),
+                )
             except Exception as error:
                 raise EmbeddingProviderError(
                     "Bedrock embedding client initialization failed"
@@ -49,18 +56,19 @@ class BedrockTitanTextEmbedder:
             raise ValueError("embedding text exceeds the Bedrock input limit")
 
         try:
-            response = self._client.invoke_model(
-                modelId=self._model_id,
-                contentType="application/json",
-                accept="application/json",
-                body=json.dumps(
-                    {
-                        "inputText": text,
-                        "dimensions": MEMORY_EMBEDDING_DIMENSIONS,
-                        "normalize": True,
-                    }
-                ),
-            )
+            with current_performance_span(component="bedrock", operation="embed"):
+                response = self._client.invoke_model(
+                    modelId=self._model_id,
+                    contentType="application/json",
+                    accept="application/json",
+                    body=json.dumps(
+                        {
+                            "inputText": text,
+                            "dimensions": MEMORY_EMBEDDING_DIMENSIONS,
+                            "normalize": True,
+                        }
+                    ),
+                )
         except Exception as error:
             raise EmbeddingProviderError("Bedrock embedding request failed") from error
         return _parse_embedding(response, self._model_id)

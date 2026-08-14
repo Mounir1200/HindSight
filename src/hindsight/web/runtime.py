@@ -1,11 +1,14 @@
 import os
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from typing import Any
 
 from hindsight.application import execute_demo
 from hindsight.infrastructure.embeddings import DEFAULT_EMBEDDING_MODEL_ID
 
 DemoRunner = Callable[[], dict[str, object]]
+ConnectionCheckout = Callable[[], AbstractContextManager[Any]]
 _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"0", "false", "no", "off", ""})
 
@@ -59,7 +62,10 @@ class DemoRuntimeConfig:
             mcp_api_key=api_key,
         )
 
-    def runner(self) -> DemoRunner:
+    def runner(
+        self,
+        connection_context_factory: ConnectionCheckout | None = None,
+    ) -> DemoRunner:
         return lambda: execute_demo(
             self.database_url,
             bedrock_model_id=self.bedrock_model_id,
@@ -68,6 +74,7 @@ class DemoRuntimeConfig:
             aws_region=self.aws_region,
             mcp_cluster_id=self.mcp_cluster_id,
             mcp_api_key=self.mcp_api_key,
+            connection_context_factory=connection_context_factory,
         )
 
 

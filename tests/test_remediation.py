@@ -31,9 +31,7 @@ def test_remediation_applies_once_and_replay_is_a_safe_noop() -> None:
     assert state["refund_amount"] == Decimal("1.00")
     assert state["invoice_status"] == "corrected"
     assert state["dispute_status"] == "closed"
-    assert state["selected_assertion_id"] == payload["verdict"][
-        "current_truth_assertion_id"
-    ]
+    assert state["selected_assertion_id"] == payload["verdict"]["current_truth_assertion_id"]
     assert (
         state["refund_count"],
         state["incident_count"],
