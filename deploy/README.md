@@ -134,7 +134,7 @@ Choose the profile before calculating cost or creating the service:
 | `ApplicationApiKeySecretArn` | Optional | Required by a CloudFormation rule |
 | Database pool per task | Lazy `0` minimum, `5` maximum by default | Explicitly size within the organization's connection budget |
 | Rate-limit pool per task | Lazy `0` minimum, `5` maximum by default | Keep as a separate bulkhead and size within the same connection budget |
-| `RateLimitScale` / `ProviderConcurrency` | Fixed at `1` / `4` | Select reviewed values within traffic and provider-spend budgets |
+| `RateLimitScale` / `ProviderConcurrency` | Scale limited to `1`, `2`, or `5`; concurrency fixed at `4` | Select reviewed values within traffic and provider-spend budgets |
 | `EnhancedObservability` | `false` by default; enable only after cost approval | Required; enables Container Insights and the CloudWatch operations dashboard |
 
 For production, create a Secrets Manager secret whose complete plain-text value is an
@@ -179,7 +179,10 @@ stale parameter file from silently turning the bounded showcase into a large pai
 Application quotas are also deployment inputs rather than hidden code changes. `RateLimitScale`
 multiplies the reviewed request and provider budgets, and `ProviderConcurrency` bounds live
 Bedrock/Titan work across every task through the shared CockroachDB lease. The showcase profile
-fixes them at `1` and `4`. Production accepts a rate scale of `0.1`, `0.25`, `0.5`, `1`, `2`,
+fixes provider concurrency at `4` and accepts a rate scale of `1`, `2`, or `5`. Raising the scale
+widens the per-client seed quota so an evaluator can run several audits in a row; the global
+per-hour quotas scale with it, and `ProviderConcurrency` — the fleet-wide bound on simultaneous
+paid work — does not move. Production accepts a rate scale of `0.1`, `0.25`, `0.5`, `1`, `2`,
 `5`, or `10`, and provider concurrency of `1`, `2`, `4`, `8`, `16`, `32`, or `64`; increase
 either only after CockroachDB and provider costs have been approved and the immutable release has
 been measured at the intended traffic shape.

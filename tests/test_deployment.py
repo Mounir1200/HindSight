@@ -113,7 +113,9 @@ def test_ecs_scaling_profiles_default_to_bounded_showcase_and_guard_production()
     assert 'Assert: !Equals [!Ref DatabasePoolMinSize, "0"]' in template
     assert 'Assert: !Equals [!Ref DatabasePoolMaxSize, "5"]' in template
     assert 'Assert: !Equals [!Ref RateLimitPoolMaxSize, "5"]' in template
-    assert 'Assert: !Equals [!Ref RateLimitScale, "1"]' in template
+    assert 'AssertDescription: Showcase accepts only a reviewed rate scale of 1, 2, or 5' in (
+        template
+    )
     assert 'Assert: !Equals [!Ref ProviderConcurrency, "4"]' in template
     assert "ProductionAuthentication:" in template
     assert 'Assert: !Not [!Equals [!Ref ApplicationApiKeySecretArn, ""]]' in template

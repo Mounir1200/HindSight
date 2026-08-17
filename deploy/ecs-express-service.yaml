@@ -313,8 +313,11 @@ Rules:
         AssertDescription: Showcase fixes the business pool ceiling at five
       - Assert: !Equals [!Ref RateLimitPoolMaxSize, "5"]
         AssertDescription: Showcase fixes the rate-limit pool ceiling at five
-      - Assert: !Equals [!Ref RateLimitScale, "1"]
-        AssertDescription: Showcase fixes request and provider budgets at the reviewed scale
+      - Assert:
+          Fn::Contains:
+            - ["1", "2", "5"]
+            - !Ref RateLimitScale
+        AssertDescription: Showcase accepts only a reviewed rate scale of 1, 2, or 5
       - Assert: !Equals [!Ref ProviderConcurrency, "4"]
         AssertDescription: Showcase fixes global provider concurrency at four
   TaskRangeMinimumTwo:
