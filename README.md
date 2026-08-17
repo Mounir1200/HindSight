@@ -8,61 +8,75 @@ HindSight reconstructs what was true, what an agent could know, what evidence it
 and whether its decision was reasonable at that moment. The reference workflow audits a
 synthetic telecom billing dispute caused by a late retroactive tariff.
 
-## Current milestone
+## Live deployment
 
-This repository implements the deterministic P0 foundation, a bounded three-agent
-workflow, and deployable AWS boundaries for the web application and ingestion:
+Running on AWS `eu-central-1`, `showcase` profile, synthetic data only:
+**https://hi-cb63ff7571af4e20bd5d23991ee1dc44.ecs.eu-central-1.on.aws**
 
-- generic bi-temporal assertions;
-- append-only fact versions with supersession metadata;
-- parameterized CockroachDB truth and knowledge queries;
-- a telecom domain adapter that calculates billing without an LLM;
-- an idempotent decision journal with explicit availability, retrieval, presentation,
-  and usage evidence;
-- a deterministic accountability verdict derived from that evidence;
-- a serializable, idempotent remediation that corrects the invoice, creates one refund,
-  closes the dispute, and opens one ingestion incident atomically;
-- procedural memory written in the same CockroachDB transaction;
-- bi-temporal procedural retrieval that guides a second, similar investigation without
-  changing its deterministic verdict or financial calculation;
-- CockroachDB Distributed Vector Index retrieval over Bedrock Titan embeddings, with exact
-  domain filters, temporal eligibility checks, similarity scores, and structured fallback;
-- a client-side Bedrock Converse tool-use loop with one case-scoped read-only tool;
-- Billing and Remediation agents that keep all calculations and mutations deterministic,
-  use Bedrock only for bounded advisory English, and share one correlation ID with the
-  Investigation Agent;
-- an optional CockroachDB Cloud Managed MCP transport that serves that tool through one
-  fixed, bounded `select_query` instead of exposing SQL generation to the model;
-- durable CockroachDB `agent_runs` and `tool_calls` traces, including bounded inputs,
-  results, token usage, stop reasons, and sanitized failures;
-- a FastAPI health/demo boundary, bounded decision/truth/knowledge/evidence/verdict reads,
-  and one responsive dashboard that renders the decision, temporal timelines, evidence,
-  remediation, and before/after memory proof;
-- a non-root Python 3.12 container selected for an ECR-to-ECS Express Mode deployment,
-  with health/readiness checks, runtime secrets, structured request logs, and two explicit
-  cost/availability profiles;
-- CockroachDB-backed demo workspace state with versioned transitions and expiring execution
-  leases, so retries, task replacement, and multiple web replicas share one durable state machine;
-- a bounded, lazy CockroachDB business-connection pool per task with short repository checkouts,
-  a checkout timeout, and a maximum connection lifetime;
-- layered public abuse protection with AWS WAF per-IP rules, bounded local token buckets,
-  CockroachDB-shared quotas, provider-cost budgets, anonymized client identities, and stable
-  `429`/`503` contracts;
-- correlation IDs plus bounded request, CockroachDB, workflow, Bedrock, embedding, memory, and
-  MCP performance spans that can be reduced to a sanitized offline evidence report;
-- private, encrypted, versioned S3 tariff and CDR intakes with image-based Lambdas,
-  bounded validation, SHA-256 provenance, idempotent writes, failure queues, and
-  one-worker safe defaults plus explicitly bounded concurrency;
-- a reproducible 35-scenario Knowledge-at-Decision-Time regression benchmark;
-- a bounded local/live operational preflight that never prints credential values;
-- idempotent demo data, focused tests, and a CLI proof with a safe replay.
+Commit `bc4e99d2f14e06d4db39c1458a6c8d3c97c2cf3e`, image digest
+`sha256:30ee21ed2e58be0a863962bedfab5bb951f1f7b679fdcce202878a45d5a81dd8`. The image is pinned
+by digest; no mutable tag is deployed.
 
-The demo proves that a EUR 0.15 rate is current truth while the billing agent could only
-know and select the EUR 0.25 rate on July 2, 2026. The resulting verdict is
-`wrong_not_knowable`. A later dispute on the same route and service retrieves the prior
-procedure before its audit, proposes a root cause, and loads four reusable verification
-steps. The deterministic audit then confirms the suggestion; memory remains advisory and
-is never an input to the verdict or financial calculation.
+```mermaid
+flowchart LR
+    U[Browser] --> WAF[AWS WAF<br/>per-IP + global rate rules]
+    WAF --> GW[ECS Express gateway<br/>HTTPS, autoscaled]
+    GW --> TASK[Fargate task<br/>FastAPI + bounded pools]
+    TASK --> CRDB[(CockroachDB Basic<br/>bi-temporal + vector index)]
+    TASK --> BR[Bedrock<br/>Nova 2 Lite + Titan v2]
+    TASK --> MCP[CockroachDB Cloud<br/>Managed MCP, read-only]
+    SM[Secrets Manager] -.credentials.-> TASK
+    ECR[ECR<br/>digest-pinned image] -.image.-> TASK
+    TASK --> CW[CloudWatch Logs<br/>correlated spans]
+```
+
+Measured on that deployment:
+
+| | |
+|---|---|
+| Full audit, `POST /demo/seed`, all providers | **8 520 ms**, status 200 |
+| Same audit driven from outside the cluster region | 15 022 ms |
+| Warm CockroachDB checkout | 7–32 ms |
+| Load-balancer health probe | < 1 ms |
+| Memory retrieval method | distributed vector index, rank `#1` |
+
+The 43 % gap between the two audit figures is network distance alone — the same image, cluster
+and provider configuration — and it is why the service is deployed beside its database. These
+are **single observations, not distributions**: no percentile, throughput, or multi-task figure
+is claimed. Full record and limits in
+[`evidence/deployment-2026-08-17.md`](evidence/deployment-2026-08-17.md).
+
+## What is implemented
+
+- **Temporal core.** Generic bi-temporal assertions, append-only fact versions with supersession
+  metadata, parameterized CockroachDB truth and knowledge-at-decision-time queries, and a telecom
+  domain adapter that calculates billing without an LLM.
+- **Accountability.** An idempotent decision journal recording availability, retrieval,
+  presentation and usage evidence; a deterministic verdict derived from that evidence; and a
+  serializable remediation that corrects the invoice, issues one refund, closes the dispute and
+  opens one ingestion incident atomically.
+- **Memory.** Procedural memory written in the same transaction, bi-temporal retrieval, and
+  CockroachDB Distributed Vector Index search over Bedrock Titan embeddings with domain filters,
+  temporal eligibility, similarity scores and structured fallback. Memory stays advisory — never
+  an input to the verdict or the financial calculation.
+- **Agents.** A bounded three-agent workflow sharing one correlation ID, a client-side Bedrock
+  Converse tool-use loop with a single case-scoped read-only tool, an optional CockroachDB Cloud
+  Managed MCP transport serving that tool through one fixed `select_query`, and durable
+  `agent_runs`/`tool_calls` traces with bounded inputs, token usage and sanitized failures.
+- **Web and deployment.** A FastAPI boundary with bounded decision/truth/knowledge/evidence/verdict
+  reads, a responsive dashboard rendering the before/after memory proof, a non-root Python 3.12
+  container deployed by digest to ECS Express Mode, CockroachDB-backed demo workspace state with
+  versioned transitions and expiring leases, and lazy bounded connection pools.
+- **Safety and operations.** Layered abuse protection (WAF, local buckets, shared quotas, provider
+  budgets, concurrency leases, anonymized identities, stable `429`/`503` contracts), correlated
+  performance spans reducible to a sanitized offline report, private encrypted S3 tariff and CDR
+  intakes with image-based Lambdas and SHA-256 provenance, a 35-scenario Knowledge-at-Decision-Time
+  benchmark, a bounded operational preflight, and idempotent demo data with a safe replay.
+
+The demo proves that a EUR 0.15 rate is current truth while the billing agent could only know and
+select the EUR 0.25 rate on July 2, 2026 — verdict `wrong_not_knowable`. A later dispute on the
+same route retrieves the prior procedure before its audit, proposes a root cause and loads four
+reusable verification steps; the deterministic audit then confirms the suggestion.
 
 ## Run with uv
 
@@ -178,197 +192,64 @@ audited run, while the only external tool in this milestone is read-only and rep
 
 ## Container and ECS Express Mode boundary
 
-HindSight uses [Amazon ECS Express Mode](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-overview.html)
-as its target web runtime. App Runner is no longer the deployment target: AWS closed it to
-new customers, existing customers can continue to use it, and AWS does not plan to add new
-features. AWS recommends ECS Express Mode as the migration path for the same class of
-containerized web applications.
+HindSight targets [Amazon ECS Express Mode](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/express-service-overview.html)
+rather than App Runner, which AWS has closed to new customers. Express Mode is available to new
+accounts, provisions the Fargate service, HTTPS load balancer, networking and autoscaling from
+one immutable image, and leaves every generated resource visible in the account for review. WAF
+protects the load balancer, Secrets Manager injects runtime credentials, and the task role is
+restricted to the declared Bedrock ARNs and secrets. There is no Express Mode surcharge.
 
-### Why ECS Express Mode
+`deploy/ecr-bootstrap.yaml` creates the encrypted, scan-on-push ECR repository with immutable
+tags. `deploy/ecs-express-service.yaml` creates a two-AZ VPC, the ECS cluster, three separate
+IAM roles, a generated HMAC secret, retained logs, the service and its WAF, plus alarms and a
+dashboard when enhanced observability is enabled. The image parameter accepts only a URI pinned
+by `sha256` digest.
 
-- **Available to new AWS accounts.** This keeps the public hackathon deployment reproducible
-  for contributors and judges instead of depending on prior App Runner eligibility.
-- **Simple managed deployment.** HindSight supplies an immutable container image and IAM roles;
-  Express Mode provisions an ECS service on Fargate, an HTTPS Application Load Balancer,
-  networking, monitoring, and auto scaling.
-- **Visible infrastructure.** The generated ECS, Fargate, load-balancing, networking, and
-  CloudWatch resources remain accessible in the project account, which makes security reviews,
-  alarms, debugging, and later customization easier than an opaque hosting boundary.
-- **Natural AWS security integration.** WAF protects the load balancer, Secrets Manager injects
-  runtime credentials, and task roles can be restricted to the selected Bedrock models and
-  declared secrets.
-- **No Express Mode surcharge.** AWS charges the underlying Fargate, load-balancer, logging,
-  data-transfer, and related resources rather than an additional Express Mode fee.
-- **Explicit cost and availability profiles.** The public `showcase` profile defaults to one
-  task; the `production` profile requires multi-task capacity and application authentication.
-  Both use the same image and durable CockroachDB coordination model.
+Each replacement task validates the application pool and the distributed rate-limit tables
+before serving. `/health` stays dependency-free so a transient database outage cannot trigger a
+restart storm; `/ready` is the explicit dependency probe. Migrations run separately with the
+schema-owner credential — the ECS task never receives `MIGRATION_DATABASE_URL`.
 
-The decision follows AWS's
-[App Runner availability and migration guidance](https://docs.aws.amazon.com/apprunner/latest/dg/apprunner-availability-change.html).
-
-Build and verify the same image locally before publishing it to a private ECR repository:
-
-```bash
-docker build -t hindsight .
-docker run --rm -p 8000:8000 --env-file .env hindsight
-```
-
-`deploy/ecr-bootstrap.yaml` creates the retained, encrypted, scan-on-push ECR repository with
-immutable tags and bounded image retention. `deploy/ecs-express-service.yaml` creates a
-dedicated two-AZ VPC, ECS cluster, the three separate IAM roles, a generated 64-character HMAC
-secret, retained application and WAF logs, the Express Gateway service, its HTTPS load
-balancer association, managed WAF protections, per-IP and global rate rules, and 5xx/latency
-alarms plus an operations dashboard when enhanced observability is enabled. The image parameter
-accepts only an ECR URI pinned by `sha256` digest. Task capacity is parameterized: one task by
-default for a bounded-cost public showcase, or at least two for the production profile.
-
-Apply migrations separately with the schema-owner credential; the ECS task must never receive
-`MIGRATION_DATABASE_URL`. Application requests are emitted as single-line JSON on stdout for
-CloudWatch collection, without bodies or query strings. Bedrock/vector/MCP integrations remain
-explicit. When either AWS provider integration is enabled, deployment requires the exact
-comma-separated model and inference-profile ARNs; the generated task role receives only
-`bedrock:InvokeModel` and `bedrock:GetInferenceProfile` on that list.
-
-The ECS profile also enables a startup readiness gate: each replacement task must validate the
-application pool and distributed rate-limit tables before it begins serving. `/health` remains
-dependency-free for ongoing liveness so a transient database outage does not trigger a restart
-storm; authenticated `/ready` remains the explicit operational dependency probe.
-
-### AWS deployment order
-
-1. Choose one AWS Region for ECR, ECS, Secrets Manager, WAF, CloudWatch, and Bedrock. ECS
-   Express Mode is available in all AWS Regions, but the selected Bedrock models must also be
-   available there or through the chosen inference profile.
-2. Create a Secrets Manager secret whose entire value is the least-privilege runtime
-   `DATABASE_URL`. Do not use a JSON object and never put `MIGRATION_DATABASE_URL` in ECS.
-3. Deploy the ECR bootstrap, build the image, push a unique immutable tag, and retrieve its
-   digest:
-
-   ```bash
-   aws cloudformation deploy \
-     --template-file deploy/ecr-bootstrap.yaml \
-     --stack-name hindsight-ecr
-   docker build -t hindsight .
-   # Authenticate Docker to the RepositoryUri output, tag, and push the image.
-   # Pass RepositoryUri@sha256:<digest> to the service stack, never :latest.
-   ```
-
-4. Run `hindsight migrate` with the separate schema-owner URL. Migrations
-   `011_rate_limits.sql` and `012_demo_workspaces.sql`, plus the documented runtime grants,
-   must exist before public traffic is accepted.
-5. Deploy the service first with AWS managed WAF groups in `COUNT`, inspect the WAF log, then
-   redeploy in `BLOCK` before sharing the URL:
-
-   ```bash
-   aws cloudformation deploy \
-     --template-file deploy/ecs-express-service.yaml \
-     --stack-name hindsight-web \
-     --capabilities CAPABILITY_IAM \
-     --parameter-overrides \
-       ImageIdentifier=<repository-uri>@sha256:<digest> \
-       DatabaseSecretArn=<runtime-database-secret-arn> \
-       ManagedRulesMode=COUNT
-   ```
-
-6. Verify `/health`, `/ready`, CloudWatch logs, and WAF `429` responses. If enhanced
-   observability was explicitly enabled, also verify the dashboard and two alarms and confirm the
-   SNS subscription when an alert email was supplied. Redeploy with `ManagedRulesMode=BLOCK`,
-   then create an AWS Budget with actual and forecast alerts before publishing the endpoint.
-
-The full parameter contract and post-deployment evidence checklist live in
-`deploy/README.md`. The stack creates the ECS roles, VPC, generated HMAC key, and WAF; enhanced
-observability adds alarms and a dashboard. The operator supplies the account/Region, profile and
-capacity, runtime database secret, immutable image, optional alert destination, the production
-application-key secret when applicable, and any explicitly enabled Bedrock or MCP values.
+**The full parameter contract, deployment order, grants and evidence checklist are in
+[`deploy/README.md`](deploy/README.md).**
 
 ### Deployment profiles and tenant boundary
 
-HindSight separates a public proof from an organization deployment instead of pretending that
-one configuration serves both jobs:
-
 | Profile | Purpose | Capacity and access |
 |---|---|---|
-| `showcase` | Public synthetic demonstration with a bounded idle cost | Fixed at one task; the API key is optional; WAF, shared quotas, provider budgets, concurrency leases, and reset-token protection remain active. |
-| `production` | Highly available deployment for one organization | CloudFormation rejects one-task or inverted capacity, permits bounded scaling, and requires `ApplicationApiKeySecretArn` plus enhanced observability. Business routes and dependency readiness require the matching Bearer token; `/health` and the data-free static dashboard shell/assets remain public. |
+| `showcase` | Public synthetic demonstration, bounded idle cost | Fixed at one task; API key optional; WAF, shared quotas, provider budgets, concurrency leases and reset-token protection stay active. |
+| `production` | One organization, highly available | CloudFormation rejects single-task or inverted capacity, and requires `ApplicationApiKeySecretArn` plus enhanced observability. Business routes and `/ready` require the Bearer token; `/health` and the data-free dashboard shell stay public. |
 
-The production boundary is **one isolated stack per organization**, with its own runtime secret,
-database scope, WAF, logs, quotas, roles, and application key. It is not a claim that callers can
-self-select a tenant namespace: no client-supplied `agent_id` or organization identifier grants
-cross-namespace access.
-
-The built-in browser page remains a public, data-free showcase shell and never embeds the
-deployment-wide Bearer key. Production consumers use authenticated API clients; an interactive
-organization UI needs an identity/session gateway in front of the stack.
+The production boundary is **one isolated stack per organization** — its own runtime secret,
+database scope, WAF, logs, quotas, roles and application key. No client-supplied `agent_id` or
+organization identifier grants cross-namespace access. The built-in browser page remains a
+data-free showcase shell and never embeds the deployment-wide key.
 
 The shared `demo_workspaces` state machine persists `empty`/`prepared`/`running`/`completed`
-transitions, a version, a bounded JSON payload, and an expiring owner lease in CockroachDB.
-Atomic claims prevent two replicas from executing the same prepared workspace, and an expired
-lease can be reclaimed after a task dies. The application uses a lazy, bounded business pool
-per task (defaults: zero warm connections, five maximum, two-second checkout timeout, 900-second
-maximum lifetime) and checks a connection out only around a repository operation; provider
-latency does not reserve a database connection. The distributed rate limiter has its own lazy,
-bounded five-connection pool per task as an admission-control bulkhead. The configured hard
-ceiling is therefore `MaxTaskCount × (DatabasePoolMaxSize + RateLimitPoolMaxSize)`.
-Per-task server concurrency and socket backlog are also bounded, with short keep-alive and the
-120-second Fargate graceful-shutdown maximum, so overload is rejected instead of accumulating
-an unbounded queue. The current synchronous showcase audit can outlive that drain; durable state
-and expiring leases make interruption recoverable, but do not promise uninterrupted in-flight work.
-The showcase is fixed at one task and leaves paid Container Insights/dashboard resources off
-unless explicitly enabled after cost approval; production requires those measurements.
-Production autoscaling defaults to ALB request count per target, which responds to this
-I/O-heavy service without waiting for CPU saturation; the target remains an explicit parameter.
-Application request/provider budgets and shared provider concurrency are explicit production
-parameters as well. The showcase fixes `RateLimitScale=1` and `ProviderConcurrency=4`; a
-production operator can select larger reviewed values without rebuilding the image, but only
-within the approved CockroachDB and provider-spend budget.
+transitions, a version and an expiring owner lease in CockroachDB. Atomic claims stop two
+replicas executing the same prepared workspace, and an expired lease is reclaimable after a task
+dies. Each task uses a lazy, bounded business pool (zero warm connections, five maximum,
+two-second checkout timeout) and holds a connection only around a repository operation, so
+provider latency never reserves one. The limiter has its own five-connection bulkhead, giving a
+hard ceiling of `MaxTaskCount × (DatabasePoolMaxSize + RateLimitPoolMaxSize)`. Server concurrency,
+backlog and graceful shutdown are bounded too, so overload is rejected rather than queued. A long
+synchronous audit can still outlive the drain: durable state and expiring leases make that
+recoverable, but do not promise uninterrupted in-flight work.
 
-`ProviderConcurrency` is a fleet-wide ceiling, not a per-task one: the concurrency lease is held
-in CockroachDB under a single key shared by every replica. Raising `MaxTaskCount` therefore adds
-request capacity and database capacity but no provider capacity; provider throughput only moves
-when `ProviderConcurrency` moves, which is what keeps provider spend bounded independently of
-scale. The same lease has an operational consequence: a task that dies mid-audit keeps its slot
-until the lease expires, so fleet provider capacity can stay reduced by up to the lease TTL
-(currently 600 seconds, derived from the provider timeouts) after a crash or a rolling
-replacement under load. Provisioning `ProviderConcurrency` above the steady-state need absorbs
-that window.
-
-Infrastructure definitions are reproducible deployment inputs, not performance or availability
-evidence by themselves. Record the image digest, stack outputs, health/readiness, WAF behavior,
-alarms, capacity, and correlated CloudWatch traces only after an authorized deployment. Do not
-publish latency or throughput numbers until they have been captured with the procedure below.
+`ProviderConcurrency` is a **fleet-wide** ceiling, not per task — the lease lives in CockroachDB
+under one key shared by every replica. Raising `MaxTaskCount` therefore adds request and database
+capacity but no provider capacity, which is what keeps provider spend bounded independently of
+scale. A task that dies mid-audit keeps its slot until the lease expires, so fleet provider
+capacity can stay reduced for up to the TTL (600 s, derived from the provider timeouts) after a
+crash or rolling replacement. Provisioning above steady-state need absorbs that window.
 
 ### Rate limiting and public abuse protection
 
-Rate limiting is enabled by default and covers every authenticated business request plus public
-shell, asset, and unknown-route traffic; the static `/health` liveness probe is exempt. When
-application authentication is configured, invalid Bearer requests are rejected before touching
-CockroachDB-backed application buckets, while WAF remains their edge abuse ceiling. The local
-profile uses a bounded in-memory token bucket. The ECS Express deployment profile must use
-CockroachDB-backed buckets so per-client and global limits survive task restarts and are shared
-across every running replica.
-When `DATABASE_URL` is present and no backend override is supplied, startup selects the
-Cockroach backend and requires the HMAC key instead of silently falling back to process-local
-protection.
-
-The policies are cumulative:
-
-- a local burst guard covers the dashboard, assets, API routes, and 404/405 traffic;
-- decision and workspace reads have a shared per-client quota;
-- every unsafe HTTP method receives mutation quotas even when a future route has not been
-  added to an explicit allowlist;
-- memory search and demo execution have stricter per-client and global quotas;
-- one provider-enabled demo execution consumes eight provider-budget credits because it can
-  invoke several Bedrock Converse and Titan embedding operations, while one vector memory
-  search consumes one credit; those credits are acquired only after route, query,
-  authorization, and demo-state validation, so malformed or impossible requests cannot drain
-  the provider budget;
-- Bedrock/Titan work also acquires one of four shared concurrency leases, released in `finally`
-  and reclaimed after ten minutes if a process dies;
-- reset attempts have a dedicated per-client quota, while the stricter global reset quota is
-  acquired only after constant-time token validation so unauthenticated traffic cannot exhaust
-  the administrator's global allowance.
-
-Default application policy:
+Protection is layered: AWS WAF reputation/known-bad-input/common groups plus three edge rate
+rules (300 req/min per IP, 10 req/min per IP on the expensive routes, 120 expensive req/min
+globally), then bounded local token buckets, then CockroachDB-shared quotas, provider spend
+budgets and concurrency leases. Application quotas remain necessary because WAF rate rules are
+approximate and cannot account for the several provider calls inside one accepted request.
 
 | Scope | Refill rate | Burst |
 |---|---:|---:|
@@ -376,103 +257,38 @@ Default application policy:
 | all API traffic, global | 600/min | 100 |
 | decision/workspace reads, per client | 60/min | 15 |
 | unsafe methods, per client | 10/min and 60/hour | 3 and 10 |
-| unsafe methods, global | 120/min | 20 |
 | memory search, per client/global | 12/min and 120/min | 3 and 20 |
 | seed attempts, per client | 6/min | 2 |
 | accepted seed execution, per client/global | 2/10 min and 12/hour | 1 and 1 |
-| reset attempts / authorized resets | 3/hour per client and 10/hour global | 1 and 1 |
+| reset attempts / authorized resets | 3/hour per client, 10/hour global | 1 and 1 |
 | provider credits, per client/global | 32/hour and 160/hour | 8 and 24 |
 | live provider concurrency, global | 4 active leases | 10-minute crash expiry |
 
-Rejected requests return `429` with `Retry-After`, `RateLimit-Limit`,
-`RateLimit-Remaining`, and `RateLimit-Reset`. A distributed limiter failure returns `503`
-before a protected handler can invoke CockroachDB, Bedrock, Titan, or MCP. A saturated business
-pool is reported the same way: an exhausted checkout returns `503 database_capacity_unavailable`
-with `Retry-After`, so pool saturation is measurable as shed load rather than hidden inside the
-generic `500` rate. `/health` is a
-static liveness check and is exempt from application rate limiting: it carries no forwarded
-address, so it resolves to the same principal as any request whose `X-Forwarded-For` cannot be
-parsed, and a shared bucket would let that traffic throttle the probe and deregister the task.
-The edge rate rules remain its ceiling. `/ready` is bounded per client rather than globally,
-requires the application Bearer credential when authentication is enabled, and fails if either
-the application database, bucket table, lease table, or grants are unusable.
+A provider-enabled demo execution costs eight credits, a vector memory search one. Credits are
+taken only after route, authorization and demo-state validation, so malformed requests cannot
+drain the budget. Provider routes take a concurrency lease **before** spending non-refundable
+credits, and release it immediately if the budget check then fails — a request rejected for lack
+of capacity never burns spend. Bedrock and embedding clients set explicit connect, read and retry
+limits; that bounded worst case is what keeps a lease from expiring mid-call.
 
-Routes that call a provider take one of the four concurrency leases before consuming their
-non-refundable spend budget, so a request rejected for lack of execution capacity does not burn
-credits. A caller that fails the subsequent budget check releases its lease immediately. Bedrock
-conversation and embedding clients set explicit connect, read, and retry limits; their
-worst-case bounded duration is what keeps a lease from expiring mid-call, which would otherwise
-let the concurrency cap be exceeded.
+Rejections return `429` with `Retry-After` and `RateLimit-*` headers. A limiter failure returns
+`503` before any provider is invoked, and an exhausted business pool returns
+`503 database_capacity_unavailable`, so saturation is measurable as shed load instead of hiding
+in the generic `500` rate. `/health` is exempt from application limits — it carries no forwarded
+address and would otherwise share a bucket with unparseable traffic, letting that traffic
+deregister the task.
 
-Client identities are stored only as HMAC-SHA256 values. Set
-`HINDSIGHT_RATE_LIMIT_HMAC_KEY` to at least 32 random bytes and keep it in Secrets Manager
-when `HINDSIGHT_RATE_LIMIT_BACKEND=cockroach`. Forwarded address headers are ignored by
-default. They are considered only when both trusted proxy hops and trusted proxy CIDRs are
-configured; IPv6 clients are grouped by `/64` to reduce trivial address rotation.
-Uvicorn's implicit proxy-header rewriting is disabled, so an untrusted request cannot change
-`request.client` merely by sending `X-Forwarded-For`. ECS Express Mode places an Application
-Load Balancer in front of the task, so the deployment must configure trusted proxy hops and
-CIDRs for the actual load-balancer/VPC boundary. The App Runner-specific trust mode is retained
-only for legacy compatibility and must remain disabled in ECS.
+Client identities are stored only as HMAC-SHA256 values; set `HINDSIGHT_RATE_LIMIT_HMAC_KEY` to
+at least 32 random bytes in Secrets Manager. Forwarded headers are ignored unless trusted proxy
+hops *and* CIDRs are configured, IPv6 clients group by `/64`, and Uvicorn's implicit proxy
+rewriting is disabled. WAF logs retain blocked *and* counted requests so `ManagedRulesMode=COUNT`
+is observable, with query strings, authorization, cookies and the reset-token header redacted.
 
-The runtime database role needs only the limiter and durable-workspace operations below in
-addition to its existing application grants. Replace the example role with the actual runtime
-principal:
-
-```sql
-GRANT SELECT, INSERT, UPDATE
-ON TABLE api_rate_limit_buckets
-TO hindsight_app;
-
-GRANT SELECT, INSERT, DELETE
-ON TABLE api_rate_limit_leases
-TO hindsight_app;
-
-GRANT SELECT, INSERT, UPDATE
-ON TABLE demo_workspaces
-TO hindsight_app;
-```
-
-The ECS Express stack attaches a regional AWS WAF web ACL to the generated Application Load
-Balancer. AWS IP-reputation, known-bad-input, and common-protection groups sit in front of
-three rate controls: 300 requests/minute per source IP overall, 10 requests/minute per IP for
-`POST /demo/seed`, `POST /demo/reset`, `POST /demo/prepare`, and `GET /memories/search`, plus
-120 expensive requests/minute across all clients.
-Encoded and non-normalized paths are transformed before comparison, and edge rejections use the same
-`429`/`Retry-After` contract. Blocked *and* counted WAF requests are retained in CloudWatch
-Logs so that `ManagedRulesMode=COUNT` is observable; query strings, authorization, cookies, and
-the reset-token header are redacted. Sampled requests stay disabled because the console sample
-viewer does not apply those redactions. The stack generates and injects a stable 64-character
-`HINDSIGHT_RATE_LIMIT_HMAC_KEY`.
-Application quotas remain necessary because WAF rate rules are approximate and cannot account
-for the multiple provider calls performed inside one accepted request.
-
-Useful controls:
-
-```dotenv
-HINDSIGHT_RATE_LIMIT_ENABLED=true
-HINDSIGHT_RATE_LIMIT_BACKEND=auto
-HINDSIGHT_RATE_LIMIT_POOL_MAX_SIZE=5
-HINDSIGHT_RATE_LIMIT_SCALE=1
-HINDSIGHT_PROVIDER_CONCURRENCY=4
-HINDSIGHT_RATE_LIMIT_MAX_LOCAL_BUCKETS=50000
-HINDSIGHT_RATE_LIMIT_TRUSTED_PROXY_HOPS=0
-HINDSIGHT_RATE_LIMIT_TRUST_APP_RUNNER_XFF=false
-```
-
-`HINDSIGHT_RATE_LIMIT_SCALE` accepts `0.1` through `10` and changes application capacities
-without weakening the separation between route classes. `HINDSIGHT_PROVIDER_CONCURRENCY`
-controls the shared live-provider lease (the deployment template permits 1–64 reviewed slots).
-`auto` resolves to CockroachDB when a database URL exists and to bounded process memory otherwise.
-The ECS stack does not expose a switch to disable WAF or the Cockroach-backed application
-limiter: WAF remains an additional edge layer, not a replacement for global provider budgets and
-concurrency leases.
-
-`POST /demo/reset` is absent unless `HINDSIGHT_DEMO_RESET_TOKEN` is configured. When enabled,
-it requires that value in `X-Demo-Reset-Token`, cannot race an active audit, and deletes only
-the fixed synthetic fixture identifiers in one CockroachDB transaction. The ECS task must
-receive the token from a separate Secrets Manager value. Bi-temporal assertions remain
-append-only; the next seed safely reuses their stable versions.
+`HINDSIGHT_RATE_LIMIT_SCALE` (`0.1`–`10`) and `HINDSIGHT_PROVIDER_CONCURRENCY` (1–64) retune
+capacity without rebuilding the image. The stack exposes no switch to disable WAF or the
+Cockroach-backed limiter. `POST /demo/reset` is absent unless `HINDSIGHT_DEMO_RESET_TOKEN` is
+configured; when enabled it cannot race an active audit and deletes only the fixed synthetic
+fixture identifiers in one transaction.
 
 ## S3 and Lambda ingestion
 
@@ -587,6 +403,25 @@ CockroachDB, or load-generation work. The exact authorization, capture, sanitiza
 reproducibility procedure is in
 [`evidence/performance/README.md`](evidence/performance/README.md). No production performance
 figures are claimed in this README until an authorized run has produced a reviewed report.
+
+### Deployed run
+
+One authorized deployment has been performed and recorded in
+[`evidence/deployment-2026-08-17.md`](evidence/deployment-2026-08-17.md): `eu-central-1`,
+`showcase` profile, commit `bc4e99d`, image digest `sha256:30ee21ed…`, with Bedrock, vector
+retrieval and managed MCP enabled. A full audit executed on the deployed service reproduced the
+learning proof — reused cases `0 -> 1`, four procedural steps loaded, recommendation changed —
+with the retrieval method reported as the CockroachDB distributed vector index at rank `#1`.
+
+One full audit completed on the deployed service in **8 520 ms**, against 15 022 ms for the same
+image and cluster driven from a developer machine outside the cluster region. That 43 % gap is
+network distance alone, and it is why the service is deployed beside its database.
+
+That record lists the individual durations observed in the deployed service's logs and names
+what remains unmeasured. Those durations are **single observations, not distributions**. In
+particular, **no percentile, throughput, or multi-task figure is claimed**: the showcase profile
+runs a single task, and the p50/p95/p99 report requires an exported capture processed by the
+offline analyzer above.
 
 ## Temporal model
 
